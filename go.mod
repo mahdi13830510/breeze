@@ -1,4 +1,4 @@
-module breeze
+module github.com/nelthaarion/breeze
 
 go 1.24.3
 
