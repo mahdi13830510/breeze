@@ -1,44 +1,79 @@
 package breeze
 
-import "strings"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
 
 type HandlerFunc func(*Context)
 
 type route struct {
-	method      Method
-	pattern     string
-	segments    []string
-	handler     HandlerFunc
-	middlewares []HandlerFunc
+	method       Method
+	pattern      string
+	segments     []string
+	handler      HandlerFunc
+	hasWildcard  bool
+	wildcardName string
 }
 
 type Router struct {
-	routes      []*route
-	middlewares []HandlerFunc
+	routes        []*route
+	middlewares   []HandlerFunc
+	staticDir     string
+	autoServeRoot bool
 }
 
 func NewRouter() *Router {
-	return &Router{}
+	return &Router{
+		staticDir:     "./public",
+		autoServeRoot: true,
+	}
 }
 
 func (r *Router) Use(mw ...HandlerFunc) {
 	r.middlewares = append(r.middlewares, mw...)
 }
 
+// Optionally change static dir
+func (r *Router) SetStaticDir(dir string) {
+	r.staticDir = dir
+}
+
 func (r *Router) Handle(method Method, pattern string, handler HandlerFunc) {
+	if pattern == "" || pattern[0] != '/' {
+		panic("invalid route pattern: must start with '/'")
+	}
+
 	trimmed := strings.Trim(pattern, "/")
 	var segments []string
+	hasWildcard := false
+	wildcardName := ""
+
 	if trimmed == "" {
 		segments = []string{} // root route
 	} else {
 		segments = strings.Split(trimmed, "/")
+		last := segments[len(segments)-1]
+
+		if strings.HasPrefix(last, "*") {
+			hasWildcard = true
+			if len(last) > 1 {
+				wildcardName = last[1:]
+			} else {
+				wildcardName = "wildcard"
+			}
+			segments = segments[:len(segments)-1]
+		}
 	}
 
 	r.routes = append(r.routes, &route{
-		method:   method,
-		pattern:  pattern,
-		segments: segments,
-		handler:  handler,
+		method:       method,
+		pattern:      pattern,
+		segments:     segments,
+		handler:      handler,
+		hasWildcard:  hasWildcard,
+		wildcardName: wildcardName,
 	})
 }
 
@@ -53,23 +88,68 @@ func (r *Router) Find(req *HTTPRequest) (HandlerFunc, []HandlerFunc, map[string]
 		if rt.method != req.Method {
 			continue
 		}
-		if len(rt.segments) != len(reqSegments) {
+
+		params := map[string]string{}
+
+		// Wildcard route
+		if rt.hasWildcard {
+			if len(reqSegments) < len(rt.segments) {
+				continue
+			}
+			match := true
+			for i := 0; i < len(rt.segments); i++ {
+				rseg := rt.segments[i]
+				pseg := reqSegments[i]
+				if strings.HasPrefix(rseg, ":") {
+					params[rseg[1:]] = pseg
+				} else if rseg != pseg {
+					match = false
+					break
+				}
+			}
+			if match {
+				rest := strings.Join(reqSegments[len(rt.segments):], "/")
+				params[rt.wildcardName] = rest
+				return rt.handler, r.middlewares, params
+			}
 			continue
 		}
 
-		params := map[string]string{}
+		// Normal route
+		if len(rt.segments) != len(reqSegments) {
+			continue
+		}
 		match := true
 		for i := range rt.segments {
-			if strings.HasPrefix(rt.segments[i], ":") {
-				params[rt.segments[i][1:]] = reqSegments[i]
-			} else if rt.segments[i] != reqSegments[i] {
+			rseg := rt.segments[i]
+			pseg := reqSegments[i]
+			if strings.HasPrefix(rseg, ":") {
+				params[rseg[1:]] = pseg
+			} else if rseg != pseg {
 				match = false
 				break
 			}
 		}
 		if match {
-			return rt.handler, rt.middlewares, params
+			return rt.handler, r.middlewares, params
 		}
 	}
+
+	// ✅ Auto serve index.html for "/"
+	if r.autoServeRoot && (req.Path == "/" || req.Path == "") && req.Method == GET {
+		indexPath := filepath.Join(r.staticDir, "index.html")
+		if _, err := os.Stat(indexPath); err == nil {
+			return func(ctx *Context) {
+				data, err := os.ReadFile(indexPath)
+				if err != nil {
+					ctx.WriteString("Error reading index.html")
+					return
+				}
+
+				ctx.HTML(data)
+			}, r.middlewares, nil
+		}
+	}
+
 	return nil, nil, nil
 }

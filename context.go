@@ -38,7 +38,14 @@ func (ctx *Context) JSON(data any) {
 		Body:    d,
 	}
 }
+func (ctx *Context) HTML(data []byte) {
 
+	ctx.Res = &HTTPResponse{
+		Status:  200,
+		Headers: map[string]string{"Content-Type": "text/html; charset=utf-8"},
+		Body:    data,
+	}
+}
 func (ctx *Context) Status(code int) {
 	if ctx.Res == nil {
 		ctx.Res = &HTTPResponse{Headers: make(map[string]string)}
