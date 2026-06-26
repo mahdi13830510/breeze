@@ -10,8 +10,11 @@ import (
 type Breeze struct {
 	*gnet.BuiltinEventEngine
 	Router *Router
-	bufs   sync.Map // fd(int) → []byte ; per-connection reassembly buffer
+	bufs   sync.Map // fd(int) → []byte ; per-connection HTTP reassembly buffer
 	Pool   *WorkerPool
+
+	// WebSocket support — initialised lazily by WebSocket().
+	wsHubFields
 }
 
 // compactThreshold: compact the leftover slice when the unused capacity
@@ -26,8 +29,25 @@ func New(router *Router, pool *WorkerPool) *Breeze {
 	}
 }
 
+// OnTraffic is called by gnet for every incoming data event.
+//
+// Routing strategy (zero-overhead fast path):
+//  1. Check wsConns sync.Map — O(1) lock-free Load.
+//     If the fd is a promoted WebSocket connection, hand off to
+//     handleWSTraffic immediately (no HTTP parsing whatsoever).
+//  2. Otherwise run the normal HTTP parse → route → dispatch pipeline.
+//
+// This means WebSocket connections have no HTTP overhead after the upgrade,
+// and HTTP connections have no WebSocket overhead (a single sync.Map miss).
 func (s *Breeze) OnTraffic(c gnet.Conn) gnet.Action {
 	fd := c.Fd()
+
+	// ── WebSocket fast path ──────────────────────────────────────────────
+	if state, ok := s.isWSConn(fd); ok {
+		return s.handleWSTraffic(c, state)
+	}
+
+	// ── HTTP path ────────────────────────────────────────────────────────
 	data, _ := c.Next(-1)
 	if len(data) == 0 {
 		return gnet.None
@@ -41,10 +61,6 @@ func (s *Breeze) OnTraffic(c gnet.Conn) gnet.Action {
 	// By appending into an existing Go slice (or a fresh one when existing
 	// is nil), we ensure buf is always GC-managed: req.Body = buf[x:y]
 	// keeps the backing array alive for exactly as long as the request lives.
-	//
-	// Cost: one append per OnTraffic call (not per request). On subsequent
-	// reads for the same fd the append grows the existing slice in-place when
-	// there is enough capacity, so the amortized cost is low.
 	var existing []byte
 	if v, ok := s.bufs.Load(fd); ok {
 		existing = v.([]byte)
@@ -100,10 +116,6 @@ func (s *Breeze) OnTraffic(c gnet.Conn) gnet.Action {
 	if len(buf) == 0 {
 		s.bufs.Delete(fd)
 	} else {
-		// Compact: if the unused capacity behind the leftover slice is large,
-		// copy to a fresh allocation so the old backing array can be GC'd.
-		// Note: req.Body for completed requests holds its own reference to the
-		// old array; the GC will not collect it until those requests are done.
 		if cap(buf)-len(buf) > compactThreshold {
 			compact := make([]byte, len(buf))
 			copy(compact, buf)
@@ -115,9 +127,18 @@ func (s *Breeze) OnTraffic(c gnet.Conn) gnet.Action {
 	return gnet.None
 }
 
-// OnClose cleans up the per-connection buffer when a connection closes.
+// OnClose cleans up all per-connection state when a connection closes.
+// For WebSocket connections that closed unexpectedly (no Close frame received),
+// we still call OnClose so the application can clean up its own state.
 func (s *Breeze) OnClose(c gnet.Conn, err error) gnet.Action {
-	s.bufs.Delete(c.Fd())
+	fd := c.Fd()
+	s.bufs.Delete(fd)
+
+	// WebSocket cleanup on unexpected close (e.g. TCP RST, network drop).
+	if state, ok := s.isWSConn(fd); ok {
+		s.cleanupWS(fd, state.wc, state.handler, 1006, "abnormal closure")
+	}
+
 	return gnet.None
 }
 
