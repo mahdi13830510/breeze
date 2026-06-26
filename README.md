@@ -16,6 +16,7 @@
 * 🧵 **Worker pool and concurrency-safe design**
 * 🧩 **Middleware support** — easily attach pre/post request logic
 * 🧰 **Lightweight and extensible** — embed your own logic or protocol layers
+* 🔌 WebSocket support + Hub (real-time connections)
 
 ---
 
@@ -64,22 +65,114 @@ import (
 
 func main() {
 	router := breeze.NewRouter()
+	pool := breeze.NewWorkerPool(runtime.NumCPU())
+	app := breeze.New(router, pool)
 
-	// Global middleware
-		router.Use(func(ctx *breeze.Context) {
-		println("Incoming request:", ctx.Req.Path)
-		ctx.Next()
+	// WebSocket() returns the hub immediately — inject it into the handler.
+	chat := &ChatHandler{}
+	chat.hub = app.WebSocket("/ws", chat)
+
+	// Inline echo endpoint using WSHandlerFunc.
+	app.WebSocket("/ws/echo", &breeze.WSHandlerFunc{
+		Connect: func(conn *breeze.WSConn) {
+
+			_ = conn.SendText("echo server ready")
+		},
+		Message: func(conn *breeze.WSConn, opcode byte, payload []byte) {
+			_ = conn.Send(opcode, payload)
+		},
+	})
+
+	// ── HTTP routes ───────────────────────────────────────────────────────
+	router.Use(middleware.SwaggerMiddleware(router, middleware.SwaggerOptions{
+		Title:       "Breeze Example API",
+		Version:     "1.0.0",
+		Description: "A demonstration of the Breeze swagger middleware.",
+		JSONPath:    "/swagger.json",
+		UIPath:      "/swagger",
+	}))
+	
+	router.Handle(breeze.GET, "/users", listUsers,
+		middleware.DocGET("/users", swagger.RouteDoc{
+			Title:       "List users",
+			Tags:        []string{"Users"},
+			Description: "Returns a paginated list of users.",
+			Input: []swagger.InputGroup{
+				{
+					Type:        swagger.InputQuery,
+					Fields:      UserQueryParams{},
+					Description: "Pagination and sorting options",
+				},
+			},
+			Output:            UserListResponse{},
+			OutputStatus:      200,
+			OutputDescription: "Paginated user list",
+		}),
+	)
+
+	// POST /users — create user
+	router.Handle(breeze.POST, "/users", createUser,
+		middleware.DocPOST("/users", swagger.RouteDoc{
+			Title: "Create user",
+			Tags:  []string{"Users"},
+			Input: []swagger.InputGroup{
+				{
+					Type:     swagger.InputBody,
+					Fields:   CreateUserRequest{},
+					Required: true,
+				},
+			},
+			Output:       UserResponse{},
+			OutputStatus: 201,
+		}),
+	)
+
+	// GET /users/:id — get single user
+	router.Handle(breeze.GET, "/users/:id", getUser,
+		middleware.DocGET("/users/:id", swagger.RouteDoc{
+			Title: "Get user by ID",
+			Tags:  []string{"Users"},
+			Input: []swagger.InputGroup{
+				{
+					Type:   swagger.InputParams,
+					Fields: UserPathParams{},
+				},
+			},
+			Output: UserResponse{},
+		}),
+	)
+
+	// DELETE /users/:id — delete user
+	router.Handle(breeze.DELETE, "/users/:id", deleteUser,
+		middleware.DocDELETE("/users/:id", swagger.RouteDoc{
+			Title: "Delete user",
+			Tags:  []string{"Users"},
+			Input: []swagger.InputGroup{
+				{Type: swagger.InputParams, Fields: UserPathParams{}},
+			},
+			Output:            struct{}{},
+			OutputStatus:      204,
+			OutputDescription: "User deleted",
+		}),
+	)
+
+	router.Handle(breeze.GET, "/ws/stats", func(ctx *breeze.Context) {
+		count := int64(0)
+		if h := app.Hub(); h != nil {
+			count = h.Count()
+		}
+		ctx.JSON(map[string]int64{"connections": count})
 	})
 
 	router.Handle(breeze.GET, "/", func(ctx *breeze.Context) {
-		ctx.JSON(map[string]string{"message": "Welcome to Breeze!"})
+		ctx.WriteString("Breeze — HTTP + WebSocket server")
 	})
 
-	router.Handle(breeze.POST, "/echo", func(ctx *breeze.Context) {
-		ctx.JSON(map[string]string{"echo": string(ctx.Req.Body)})
-	})
-	app := breeze.New(router, breeze.NewWorkerPool(runtime.NumCPU()))
-	app.Run(8080, router)
+	fmt.Println("Breeze listening on :3000")
+	fmt.Println("  WebSocket chat : ws://localhost:3000/ws")
+	fmt.Println("  WebSocket echo : ws://localhost:3000/ws/echo")
+	fmt.Println("  WS stats       : GET /ws/stats")
+	app.Run(3000, true)
 }
 ```
 
