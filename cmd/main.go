@@ -52,13 +52,13 @@ func main() {
 	// It is wired as a global middleware via router.Use so it runs on every
 	// request, but its only runtime work is ctx.Next() — all real work
 	// (doc registration, spec generation) happens at startup.
-	router.Use(middleware.SwaggerMiddleware(router, middleware.SwaggerOptions{
-		Title:       "Breeze Example API",
-		Version:     "1.0.0",
-		Description: "A demonstration of the Breeze swagger middleware.",
-		JSONPath:    "/swagger.json",
-		UIPath:      "/swagger",
-	}))
+	// router.Use(middleware.SwaggerMiddleware(router, middleware.SwaggerOptions{
+	// 	Title:       "Breeze Example API",
+	// 	Version:     "1.0.0",
+	// 	Description: "A demonstration of the Breeze swagger middleware.",
+	// 	JSONPath:    "/swagger.json",
+	// 	UIPath:      "/swagger",
+	// }))
 
 	// ── Routes ───────────────────────────────────────────────────────────────
 
@@ -126,6 +126,7 @@ func main() {
 			OutputDescription: "User deleted",
 		}),
 	)
+	router.Handle(breeze.GET, "/", func(ctx *breeze.Context) { ctx.WriteString("") })
 	app := breeze.New(router, breeze.NewWorkerPool(runtime.NumCPU()))
 	app.Run(3000, true)
 }

@@ -7,27 +7,15 @@ import (
 	"github.com/panjf2000/gnet/v2"
 )
 
-// Breeze is the main server struct, embedding gnet's event engine.
-//
-// Performance decisions:
-//   - s.mu + s.Bufs[fd] uses per-connection buffering. The single mutex
-//     creates contention between gnet reactors when multicore=true.
-//     We mitigate this with sync.Map so each fd's read/write is independent.
-//   - buf reslicing (buf = buf[consumed:]) kept the full backing array alive,
-//     leaking memory under pipelining. We now compact: when leftover bytes
-//     are small we copy them to a fresh slice so the large receive buffer can
-//     be GC'd.
-//   - The exec closure captures ctx and c by value so the goroutine/worker
-//     doesn't pin the loop variable across iterations.
 type Breeze struct {
 	*gnet.BuiltinEventEngine
 	Router *Router
-	bufs   sync.Map // fd(int) → []byte ; replaces map+Mutex
+	bufs   sync.Map // fd(int) → []byte ; per-connection reassembly buffer
 	Pool   *WorkerPool
 }
 
-// compactThreshold: if leftover bytes after consuming a request are less than
-// this fraction of the buffer, compact into a fresh slice.
+// compactThreshold: compact the leftover slice when the unused capacity
+// exceeds this many bytes, to avoid keeping large receive buffers alive.
 const compactThreshold = 512
 
 func New(router *Router, pool *WorkerPool) *Breeze {
@@ -45,27 +33,28 @@ func (s *Breeze) OnTraffic(c gnet.Conn) gnet.Action {
 		return gnet.None
 	}
 
-	// Load existing buffer for this connection (nil if first read).
-	var buf []byte
+	// Always copy incoming data into a Go-owned buffer.
+	//
+	// gnet's data slice is a view into gnet's internal ring buffer.
+	// gnet is free to overwrite that memory as soon as OnTraffic returns,
+	// but req.Body may still reference it from a worker goroutine.
+	// By appending into an existing Go slice (or a fresh one when existing
+	// is nil), we ensure buf is always GC-managed: req.Body = buf[x:y]
+	// keeps the backing array alive for exactly as long as the request lives.
+	//
+	// Cost: one append per OnTraffic call (not per request). On subsequent
+	// reads for the same fd the append grows the existing slice in-place when
+	// there is enough capacity, so the amortized cost is low.
+	var existing []byte
 	if v, ok := s.bufs.Load(fd); ok {
-		existing := v.([]byte)
-		buf = append(existing, data...)
-	} else {
-		// First read: avoid a copy when data already contains a full request.
-		buf = data
+		existing = v.([]byte)
 	}
+	buf := append(existing, data...)
 
 	for len(buf) > 0 {
 		req, consumed, err := ParseHTTPRequest(buf)
 		if err != nil {
-			resp := []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\n\r\nBad Request")
-			msg := err.Error()
-			if msg == "request body too large" {
-				resp = []byte("HTTP/1.1 413 Content Too Large\r\nContent-Length: 20\r\n\r\nRequest body too large")
-			} else if msg == "transfer-encoding not supported" {
-				resp = []byte("HTTP/1.1 501 Not Implemented\r\nContent-Length: 30\r\n\r\nTransfer-Encoding not supported")
-			}
-			c.AsyncWrite(resp, nil)
+			c.AsyncWrite([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\n\r\nBad Request"), nil)
 			buf = nil
 			break
 		}
@@ -78,9 +67,6 @@ func (s *Breeze) OnTraffic(c gnet.Conn) gnet.Action {
 		if handler == nil {
 			c.AsyncWrite([]byte("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found"), nil)
 		} else {
-			// Capture loop variables explicitly so the closure is safe to
-			// run concurrently (each iteration of the for-loop gets its own
-			// req, params, handler).
 			ctx := &Context{
 				Conn:        c,
 				Req:         req,
@@ -114,8 +100,10 @@ func (s *Breeze) OnTraffic(c gnet.Conn) gnet.Action {
 	if len(buf) == 0 {
 		s.bufs.Delete(fd)
 	} else {
-		// Compact: if the leftover is small relative to the backing array,
-		// copy it so the large receive buffer can be GC'd.
+		// Compact: if the unused capacity behind the leftover slice is large,
+		// copy to a fresh allocation so the old backing array can be GC'd.
+		// Note: req.Body for completed requests holds its own reference to the
+		// old array; the GC will not collect it until those requests are done.
 		if cap(buf)-len(buf) > compactThreshold {
 			compact := make([]byte, len(buf))
 			copy(compact, buf)

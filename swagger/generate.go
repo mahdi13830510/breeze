@@ -3,7 +3,6 @@ package swagger
 import (
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/goccy/go-json"
 )
@@ -157,34 +156,9 @@ func buildOperation(entry routeEntry) Operation {
 	return op
 }
 
-// uiCache holds the pre-rendered Swagger UI HTML.
-// GenerateUI is called once at startup; caching avoids rebuilding the page
-// on every /swagger request.
-var (
-	uiCacheMu   sync.Mutex
-	uiCacheKey  string
-	uiCacheBody []byte
-)
-
 // GenerateUI returns an HTML page that embeds Swagger UI pointing at jsonPath.
-// The result is cached after the first call — jsonPath is set once at startup
-// and never changes at runtime.
+// jsonPath is the URL the browser will fetch the OpenAPI JSON from (e.g. "/swagger.json").
 func GenerateUI(jsonPath string) []byte {
-	uiCacheMu.Lock()
-	defer uiCacheMu.Unlock()
-	if uiCacheKey == jsonPath && uiCacheBody != nil {
-		return uiCacheBody
-	}
-
-	// Escape jsonPath so that a value containing `"` or `</script>`
-	// cannot break out of the JS string literal.
-	safeURL := strings.NewReplacer(
-		`&`, `&amp;`,
-		`"`, `&quot;`,
-		`<`, `&lt;`,
-		`>`, `&gt;`,
-	).Replace(jsonPath)
-
 	html := `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -199,7 +173,7 @@ func GenerateUI(jsonPath string) []byte {
 <script>
   window.onload = function () {
     SwaggerUIBundle({
-      url: "` + safeURL + `",
+      url: "` + jsonPath + `",
       dom_id: "#swagger-ui",
       presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
       layout: "BaseLayout",
@@ -209,10 +183,7 @@ func GenerateUI(jsonPath string) []byte {
 </script>
 </body>
 </html>`
-
-	uiCacheKey = jsonPath
-	uiCacheBody = []byte(strings.TrimSpace(html))
-	return uiCacheBody
+	return []byte(strings.TrimSpace(html))
 }
 
 // httpStatusText maps common status codes to their reason phrases.
