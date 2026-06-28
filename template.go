@@ -1,0 +1,1343 @@
+package breeze
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"html/template"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+)
+
+// ─── Template Engine ──────────────────────────────────────────────────────────
+//
+// BreezeTemplate provides a server-side HTML template engine that renders views
+// and components using Go's html/template package, with a built-in SPA runtime
+// injected automatically into every page response.
+//
+// SPA behaviour:
+//   - All <a href="..."> clicks are intercepted client-side.
+//   - Navigation sends a fetch() to the same URL with header "X-Breeze-Partial: true".
+//   - The server detects this header and returns only the inner content (no layout).
+//   - The client swaps the content into the #breeze-app container without a full reload.
+//   - The browser URL and history are updated with pushState.
+//
+// Views vs Components:
+//   - Views are full pages (optionally wrapped in a layout).
+//   - Components are partial HTML fragments that can be embedded via {{component "name" .}}
+//
+// Directory structure (configurable):
+//
+//	views/
+//	  layout.html          ← optional shared layout (define "layout")
+//	  home.html
+//	  about.html
+//	components/
+//	  nav.html             ← define "nav"
+//	  card.html            ← define "card"
+
+// TemplateEngine holds all parsed templates and configuration.
+type TemplateEngine struct {
+	mu         sync.RWMutex
+	templates  map[string]*template.Template // view name → full template set
+	components map[string]*template.Template // component name → template
+	viewsDir   string
+	compDir    string
+	layoutFile string
+	funcMap    template.FuncMap
+	devMode    bool // if true, re-parse on every render (hot reload)
+}
+
+// TemplateConfig configures the template engine.
+type TemplateConfig struct {
+	// ViewsDir is the directory containing view templates. Default: "views"
+	ViewsDir string
+	// ComponentsDir is the directory containing component templates. Default: "components"
+	ComponentsDir string
+	// LayoutFile is the path to the layout template. Default: "views/layout.html"
+	// Set to "" to disable layout wrapping.
+	LayoutFile string
+	// FuncMap adds custom template functions.
+	FuncMap template.FuncMap
+	// DevMode disables template caching so changes are reflected immediately.
+	DevMode bool
+}
+
+// NewTemplateEngine creates a template engine from the given config.
+func NewTemplateEngine(cfg TemplateConfig) *TemplateEngine {
+	if cfg.ViewsDir == "" {
+		cfg.ViewsDir = "views"
+	}
+	if cfg.ComponentsDir == "" {
+		cfg.ComponentsDir = "components"
+	}
+	if cfg.LayoutFile == "" {
+		cfg.LayoutFile = filepath.Join(cfg.ViewsDir, "layout.html")
+	}
+
+	te := &TemplateEngine{
+		templates:  make(map[string]*template.Template),
+		components: make(map[string]*template.Template),
+		viewsDir:   cfg.ViewsDir,
+		compDir:    cfg.ComponentsDir,
+		layoutFile: cfg.LayoutFile,
+		devMode:    cfg.DevMode,
+		funcMap:    cfg.FuncMap,
+	}
+
+	if te.funcMap == nil {
+		te.funcMap = template.FuncMap{}
+	}
+
+	// Built-in "component" function — renders a named component with data.
+	te.funcMap["component"] = func(name string, data any) (template.HTML, error) {
+		var buf bytes.Buffer
+		if err := te.renderComponent(name, data, &buf); err != nil {
+			return "", err
+		}
+		return template.HTML(buf.String()), nil
+	}
+
+	// Built-in "partial" alias for component.
+	te.funcMap["partial"] = te.funcMap["component"]
+
+	// Built-in "map" helper: create a map[string]any inline inside a template.
+	// Usage: {{component "card" (map "title" "Hello" "body" "World")}}
+	te.funcMap["map"] = func(pairs ...any) (map[string]any, error) {
+		if len(pairs)%2 != 0 {
+			return nil, fmt.Errorf("breeze/template: map requires an even number of arguments (key-value pairs)")
+		}
+		m := make(map[string]any, len(pairs)/2)
+		for i := 0; i < len(pairs); i += 2 {
+			key, ok := pairs[i].(string)
+			if !ok {
+				return nil, fmt.Errorf("breeze/template: map keys must be strings")
+			}
+			m[key] = pairs[i+1]
+		}
+		return m, nil
+	}
+
+	return te
+}
+
+// ─── Parsing ──────────────────────────────────────────────────────────────────
+
+// parseView parses a view file together with all component files and the layout
+// (if present) into a single *template.Template set.
+func (te *TemplateEngine) parseView(viewName string) (*template.Template, error) {
+	viewPath := filepath.Join(te.viewsDir, viewName+".html")
+
+	// Collect files: view first, then components, then layout.
+	files := []string{viewPath}
+
+	// Glob all component files.
+	compFiles, _ := filepath.Glob(filepath.Join(te.compDir, "*.html"))
+	files = append(files, compFiles...)
+
+	// Include layout if it exists and is not the view itself.
+	if te.layoutFile != "" {
+		if _, err := os.Stat(te.layoutFile); err == nil {
+			absLayout, _ := filepath.Abs(te.layoutFile)
+			absView, _ := filepath.Abs(viewPath)
+			if absLayout != absView {
+				files = append(files, te.layoutFile)
+			}
+		}
+	}
+
+	t := template.New(filepath.Base(viewPath)).Funcs(te.funcMap)
+	return t.ParseFiles(files...)
+}
+
+// parseComponent parses a single component file.
+func (te *TemplateEngine) parseComponent(name string) (*template.Template, error) {
+	path := filepath.Join(te.compDir, name+".html")
+	t := template.New(filepath.Base(path)).Funcs(te.funcMap)
+	return t.ParseFiles(path)
+}
+
+// ─── Rendering ────────────────────────────────────────────────────────────────
+
+// renderComponent renders a named component to w.
+//
+// Component files define a named block: {{define "nav"}}...{{end}}
+// After ParseFiles, that block lives as a named template inside the set.
+// We must call t.Lookup(name) — t.Execute() runs the anonymous root template
+// (the file wrapper), which is empty and produces no output.
+func (te *TemplateEngine) renderComponent(name string, data any, w *bytes.Buffer) error {
+	exec := func(t *template.Template) error {
+		named := t.Lookup(name)
+		if named == nil {
+			named = t // fallback: no {{define}}, execute root directly
+		}
+		return named.Execute(w, data)
+	}
+
+	if te.devMode {
+		t, err := te.parseComponent(name)
+		if err != nil {
+			return fmt.Errorf("breeze/template: component %q: %w", name, err)
+		}
+		return exec(t)
+	}
+
+	te.mu.RLock()
+	t, ok := te.components[name]
+	te.mu.RUnlock()
+
+	if !ok {
+		var err error
+		t, err = te.parseComponent(name)
+		if err != nil {
+			return fmt.Errorf("breeze/template: component %q: %w", name, err)
+		}
+		te.mu.Lock()
+		te.components[name] = t
+		te.mu.Unlock()
+	}
+	return exec(t)
+}
+
+// RenderView renders a view and writes the response to ctx.
+//
+//   - In a normal request it wraps the view in the layout (if defined) and
+//     injects the Breeze SPA runtime script.
+//   - When the request carries "X-Breeze-Partial: true" it returns only the
+//     inner view fragment so the client-side router can swap it in without a
+//     full page reload.
+func (te *TemplateEngine) RenderView(ctx *Context, viewName string, data any) {
+	isPartial := ctx.Req.Header["x-breeze-partial"] == "true"
+
+	var buf bytes.Buffer
+
+	if te.devMode {
+		t, err := te.parseView(viewName)
+		if err != nil {
+			ctx.Status(500)
+			ctx.WriteString(fmt.Sprintf("template error: %v", err))
+			return
+		}
+		if err := te.execView(t, viewName, data, isPartial, &buf); err != nil {
+			ctx.Status(500)
+			ctx.WriteString(fmt.Sprintf("render error: %v", err))
+			return
+		}
+	} else {
+		te.mu.RLock()
+		t, ok := te.templates[viewName]
+		te.mu.RUnlock()
+
+		if !ok {
+			var err error
+			t, err = te.parseView(viewName)
+			if err != nil {
+				ctx.Status(500)
+				ctx.WriteString(fmt.Sprintf("template error: %v", err))
+				return
+			}
+			te.mu.Lock()
+			te.templates[viewName] = t
+			te.mu.Unlock()
+		}
+
+		if err := te.execView(t, viewName, data, isPartial, &buf); err != nil {
+			ctx.Status(500)
+			ctx.WriteString(fmt.Sprintf("render error: %v", err))
+			return
+		}
+	}
+
+	ctx.HTML(buf.Bytes())
+}
+
+// execView executes the right template definition inside t.
+//
+// Resolution order:
+//  1. If partial → execute the template named after the view file (the content block).
+//  2. If layout is defined → execute "layout" (which embeds content via {{template "content" .}}).
+//  3. Otherwise → execute the view template directly.
+func (te *TemplateEngine) execView(
+	t *template.Template,
+	viewName string,
+	data any,
+	isPartial bool,
+	buf *bytes.Buffer,
+) error {
+	// Wrap data with template helpers.
+	td := &TemplateData{
+		Data:    data,
+		engine:  te,
+		partial: isPartial,
+	}
+
+	if isPartial {
+		// Render only the content block; client swaps it.
+		contentTmpl := t.Lookup("content")
+		if contentTmpl == nil {
+			// No "content" block defined — render the whole view file.
+			contentTmpl = t.Lookup(viewName + ".html")
+		}
+		if contentTmpl == nil {
+			contentTmpl = t
+		}
+		return contentTmpl.Execute(buf, td)
+	}
+
+	// Full page: prefer a "layout" definition, else render view directly.
+	layoutTmpl := t.Lookup("layout")
+	if layoutTmpl != nil {
+		if err := layoutTmpl.Execute(buf, td); err != nil {
+			return err
+		}
+	} else {
+		viewTmpl := t.Lookup(viewName + ".html")
+		if viewTmpl == nil {
+			viewTmpl = t
+		}
+		if err := viewTmpl.Execute(buf, td); err != nil {
+			return err
+		}
+	}
+
+	// Serialize page data as JSON so breeze.data() can read it client-side.
+	dataJSON, jsonErr := marshalPageData(data)
+	if jsonErr != nil {
+		dataJSON = []byte("{}")
+	}
+
+	// Embed raw template sources so the client can re-render without a server round-trip.
+	tmplSources := te.collectTemplateSources(viewName)
+
+	// Inject data tag + template sources + SPA runtime just before </body>.
+	html := buf.String()
+	injection := breezeDataScript(dataJSON) + breezeTemplateScript(tmplSources) + breezeRuntime()
+	if idx := strings.LastIndex(html, "</body>"); idx != -1 {
+		buf.Reset()
+		buf.WriteString(html[:idx])
+		buf.WriteString(injection)
+		buf.WriteString(html[idx:])
+	} else {
+		// No </body> — append at end.
+		buf.WriteString(injection)
+	}
+
+	return nil
+}
+
+// marshalPageData safely serializes page data to JSON for client access.
+func marshalPageData(data any) ([]byte, error) {
+	if data == nil {
+		return []byte("{}"), nil
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		return []byte("{}"), err
+	}
+	return b, nil
+}
+
+// ─── Client-side template embedding ──────────────────────────────────────────
+
+// collectTemplateSources reads the raw source of a view and all component files,
+// strips the {{define "name"}}...{{end}} wrapper, and returns a map of
+// template-name → inner source string. This map is embedded in the page so the
+// client can re-render without an extra round-trip to the server.
+func (te *TemplateEngine) collectTemplateSources(viewName string) map[string]string {
+	sources := make(map[string]string)
+
+	// ── View content block ────────────────────────────────────────────────
+	viewPath := filepath.Join(te.viewsDir, viewName+".html")
+	if raw, err := os.ReadFile(viewPath); err == nil {
+		sources[viewName] = stripDefine(string(raw))
+	}
+
+	// ── All component files ───────────────────────────────────────────────
+	compFiles, _ := filepath.Glob(filepath.Join(te.compDir, "*.html"))
+	for _, cf := range compFiles {
+		name := strings.TrimSuffix(filepath.Base(cf), ".html")
+		if raw, err := os.ReadFile(cf); err == nil {
+			sources[name] = stripDefine(string(raw))
+		}
+	}
+
+	return sources
+}
+
+// stripDefine removes the outer {{define "name"}} ... {{end}} wrapper from a
+// template file, leaving only the inner content string.
+// If no define wrapper is present the whole source is returned unchanged.
+func stripDefine(src string) string {
+	s := strings.TrimSpace(src)
+
+	// Match  {{define "..."}}  or  {{define `...`}}  at the start.
+	for _, quote := range []string{`"`, "`"} {
+		prefix := `{{define ` + quote
+		if strings.HasPrefix(s, prefix) {
+			closeQuote := strings.Index(s[len(prefix):], quote)
+			if closeQuote < 0 {
+				continue
+			}
+			afterName := s[len(prefix)+closeQuote+1:]
+			// skip optional whitespace then "}}"
+			afterName = strings.TrimLeft(afterName, " \t")
+			if strings.HasPrefix(afterName, "}}") {
+				inner := afterName[2:]
+				// strip trailing {{end}}
+				if idx := strings.LastIndex(inner, "{{end}}"); idx >= 0 {
+					inner = inner[:idx]
+				}
+				return strings.TrimSpace(inner)
+			}
+		}
+	}
+	return s
+}
+
+// breezeTemplateScript serializes the template-sources map as JSON inside a
+// non-executing script tag so the client can read it with breeze._tmpl(name).
+func breezeTemplateScript(sources map[string]string) string {
+	b, err := json.Marshal(sources)
+	if err != nil {
+		b = []byte("{}")
+	}
+	return `<script id="__breeze_tmpl__" type="application/json">` +
+		string(b) +
+		`</script>` + "\n"
+}
+
+// ─── TemplateData ─────────────────────────────────────────────────────────────
+
+// TemplateData wraps the user's data and exposes helpers inside templates.
+type TemplateData struct {
+	Data    any
+	engine  *TemplateEngine
+	partial bool
+}
+
+// IsPartial returns true when the current render is a SPA partial request.
+func (td *TemplateData) IsPartial() bool { return td.partial }
+
+// ─── Re-render endpoint ───────────────────────────────────────────────────────
+
+// reRenderRequest is the JSON body sent by breeze.render() on the client.
+type reRenderRequest struct {
+	View      string `json:"view"`      // render a full view's content block
+	Component string `json:"component"` // render a single component
+	Data      any    `json:"data"`      // arbitrary data passed to the template
+}
+
+// RenderJSON renders a view or component from a JSON request body.
+// It is used by the /breeze/render endpoint registered by EnableReRender.
+// The caller decides which wins: Component takes precedence over View.
+func (te *TemplateEngine) RenderJSON(ctx *Context) {
+	var req reRenderRequest
+	if err := json.Unmarshal(ctx.Req.Body, &req); err != nil {
+		ctx.Status(400)
+		ctx.WriteString("breeze/render: invalid JSON body: " + err.Error())
+		return
+	}
+
+	var buf bytes.Buffer
+
+	if req.Component != "" {
+		// Component render — bare fragment, no layout.
+		if err := te.renderComponent(req.Component, req.Data, &buf); err != nil {
+			ctx.Status(500)
+			ctx.WriteString(fmt.Sprintf("breeze/render: component %q: %v", req.Component, err))
+			return
+		}
+		ctx.HTML(buf.Bytes())
+		return
+	}
+
+	if req.View != "" {
+		// View render — returns only the content block (always partial).
+		t, err := func() (*template.Template, error) {
+			if te.devMode {
+				return te.parseView(req.View)
+			}
+			te.mu.RLock()
+			t, ok := te.templates[req.View]
+			te.mu.RUnlock()
+			if ok {
+				return t, nil
+			}
+			parsed, err := te.parseView(req.View)
+			if err != nil {
+				return nil, err
+			}
+			te.mu.Lock()
+			te.templates[req.View] = parsed
+			te.mu.Unlock()
+			return parsed, nil
+		}()
+		if err != nil {
+			ctx.Status(500)
+			ctx.WriteString(fmt.Sprintf("breeze/render: view %q: %v", req.View, err))
+			return
+		}
+		if err := te.execView(t, req.View, req.Data, true /* always partial */, &buf); err != nil {
+			ctx.Status(500)
+			ctx.WriteString(fmt.Sprintf("breeze/render: view %q exec: %v", req.View, err))
+			return
+		}
+		ctx.HTML(buf.Bytes())
+		return
+	}
+
+	ctx.Status(400)
+	ctx.WriteString(`breeze/render: request must include "view" or "component"`)
+}
+
+// ─── Router integration ───────────────────────────────────────────────────────
+
+// View registers a GET route that renders the named view template.
+//
+// Usage:
+//
+//	engine := breeze.NewTemplateEngine(breeze.TemplateConfig{})
+//	router.View("/", engine, "home", nil)
+//	router.View("/about", engine, "about", func(ctx *breeze.Context) any {
+//	    return map[string]any{"title": "About Us"}
+//	})
+func (r *Router) View(
+	pattern string,
+	engine *TemplateEngine,
+	viewName string,
+	dataFn func(*Context) any,
+) {
+	r.Handle(GET, pattern, func(ctx *Context) {
+		var data any
+		if dataFn != nil {
+			data = dataFn(ctx)
+		}
+		engine.RenderView(ctx, viewName, data)
+	})
+}
+
+// ─── Context helper ───────────────────────────────────────────────────────────
+
+// Render renders a view template with the given data and writes it to the response.
+//
+// Usage inside a handler:
+//
+//	ctx.Render(engine, "home", map[string]any{"title": "Home"})
+func (ctx *Context) Render(engine *TemplateEngine, viewName string, data any) {
+	engine.RenderView(ctx, viewName, data)
+}
+
+// ─── Server-side fragment helpers ────────────────────────────────────────────
+
+// RenderComponent renders a single component as a bare HTML fragment.
+// No layout, no SPA script injection. Designed for endpoints that feed
+// breeze.fetch() / breeze.poll() on the client.
+func (te *TemplateEngine) RenderComponent(ctx *Context, componentName string, data any) {
+	var buf bytes.Buffer
+	if err := te.renderComponent(componentName, data, &buf); err != nil {
+		ctx.Status(500)
+		ctx.WriteString(fmt.Sprintf("component error: %v", err))
+		return
+	}
+	ctx.HTML(buf.Bytes())
+}
+
+// Fragment registers a GET route that returns a bare HTML fragment — either a
+// component or a view's content block — with no layout and no SPA script.
+// These endpoints are meant to be consumed by breeze.fetch() / breeze.poll().
+//
+// Usage:
+//
+//	// serve a component fragment at /fragments/stats
+//	router.Fragment("/fragments/stats", engine, "stats", func(ctx *breeze.Context) any {
+//	    return map[string]any{"count": getCount()}
+//	})
+//
+// Then in any template:
+//
+//	<div id="stats-box"></div>
+//	<script>
+//	  breeze.poll('/fragments/stats', '#stats-box', 3000)
+//	</script>
+func (r *Router) Fragment(
+	pattern string,
+	engine *TemplateEngine,
+	componentName string,
+	dataFn func(*Context) any,
+) {
+	r.Handle(GET, pattern, func(ctx *Context) {
+		var data any
+		if dataFn != nil {
+			data = dataFn(ctx)
+		}
+		engine.RenderComponent(ctx, componentName, data)
+	})
+}
+
+// EnableReRender registers the built-in POST /breeze/render endpoint.
+//
+// Call this once at startup (after creating the engine). The client-side
+// breeze.render() and breeze.setData() functions use this endpoint to
+// re-render any view or component with new data and swap it into the DOM.
+//
+// Usage:
+//
+//	engine := breeze.NewTemplateEngine(breeze.TemplateConfig{...})
+//	router.EnableReRender(engine)
+func (r *Router) EnableReRender(engine *TemplateEngine) {
+	r.Handle(POST, "/breeze/render", func(ctx *Context) {
+		engine.RenderJSON(ctx)
+	})
+}
+
+// ─── SPA Runtime ──────────────────────────────────────────────────────────────
+
+// breezeRuntime returns the client-side JavaScript that enables:
+//
+//  1. Smart script execution — external scripts load once; inline scripts honour
+//     data-spa-run="always"|"once"|default(never re-run); modules are preserved.
+//  2. SPA navigation — intercepts <a> clicks, fetches partials, swaps #breeze-app.
+//  3. SPA form handling — intercepts <form> submits (GET serialises query string;
+//     POST uses fetch). Skips target="_blank", multipart, data-spa="false", external.
+//  4. Lifecycle hooks — Breeze.onBeforeNavigate / onAfterNavigate /
+//     onBeforeSubmit / onAfterSubmit.
+//  5. Loading state — adds/removes body.breeze-loading during navigation & submit.
+//  6. Error handling — fetch failures fall back to normal browser navigation/submit.
+//  7. breeze.fetch / poll / stop / swap / data / setData / render / watch / ws.
+func breezeRuntime() string {
+	return `
+<script id="__breeze_spa__">
+(function () {
+  'use strict';
+
+  // ── Lifecycle hooks ────────────────────────────────────────────────────
+  //
+  // Breeze.onBeforeNavigate(fn) / onAfterNavigate(fn)
+  // Breeze.onBeforeSubmit(fn)   / onAfterSubmit(fn)
+  //
+  // fn receives a detail object:
+  //   onBeforeNavigate({ url })          — return false to cancel
+  //   onAfterNavigate({ url })
+  //   onBeforeSubmit({ form, url })      — return false to cancel
+  //   onAfterSubmit({ form, url, html })
+  //
+  // Multiple handlers can be registered; they run in registration order.
+
+  var _hooks = {
+    beforeNavigate: [],
+    afterNavigate:  [],
+    beforeSubmit:   [],
+    afterSubmit:    [],
+  };
+
+  function _runHooks(name, detail) {
+    var list = _hooks[name];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i](detail) === false) return false;
+    }
+    return true;
+  }
+
+  // ── Loading state ──────────────────────────────────────────────────────
+
+  function _loadingStart() { document.body.classList.add('breeze-loading'); }
+  function _loadingEnd()   { document.body.classList.remove('breeze-loading'); }
+
+  // ── Smart script execution ─────────────────────────────────────────────
+  //
+  // Rules (applied inside swap() after every fragment insert):
+  //
+  //   External scripts (src="..."):
+  //     Execute only once. A module-level Set tracks loaded URLs.
+  //     If already loaded, the <script> element is removed so it doesn't
+  //     appear in the DOM twice but its side-effects are not repeated.
+  //
+  //   Inline scripts (no src):
+  //     data-spa-run="always" → execute on every swap (the explicit opt-in).
+  //     data-spa-run="once"   → execute once per page lifecycle (tracked by Set).
+  //     no attribute          → never re-execute after the initial page load.
+  //     The attribute is checked case-insensitively.
+  //
+  //   Module scripts (type="module"):
+  //     Always external-style de-duplication for src modules.
+  //     Inline modules execute only on initial page load (browser de-dupes them
+  //     anyway for the src case; we honour the same for inline).
+  //
+  //   Execution order:
+  //     Scripts are processed in document order (forEach preserves DOM order).
+  //     Each eligible script is cloned and appended; the old node is removed.
+
+  // URLs of external scripts already executed (survives across navigations).
+  var _loadedScripts = new Set();
+  // IDs/src of inline once-scripts already run (keyed by data-spa-id or content hash).
+  var _onceScripts   = new Set();
+
+  // Simple djb2-style hash for content-keying inline once-scripts.
+  function _hashStr(s) {
+    var h = 5381;
+    for (var i = 0; i < s.length; i++) h = (h * 33) ^ s.charCodeAt(i);
+    return (h >>> 0).toString(36);
+  }
+
+  // Execute scripts inside el after a swap. el is the element whose innerHTML
+  // was just replaced. Scripts already in the document head are not affected.
+  function _runScripts(el) {
+    var scripts = el.querySelectorAll('script');
+    scripts.forEach(function (old) {
+      var src     = old.getAttribute('src');
+      var type    = (old.getAttribute('type') || '').toLowerCase().trim();
+      var spaRun  = (old.getAttribute('data-spa-run') || '').toLowerCase().trim();
+      var isModule = type === 'module';
+
+      // ── External script ──────────────────────────────────────────────
+      if (src) {
+        var key = src;
+        if (_loadedScripts.has(key)) {
+          // Already loaded — remove the stale node, do not re-execute.
+          old.parentNode && old.parentNode.removeChild(old);
+          return;
+        }
+        _loadedScripts.add(key);
+        var s = document.createElement('script');
+        Array.from(old.attributes).forEach(function (a) { s.setAttribute(a.name, a.value); });
+        old.parentNode.replaceChild(s, old);
+        return;
+      }
+
+      // ── Inline script ────────────────────────────────────────────────
+      var content = old.textContent || '';
+
+      if (spaRun === 'always') {
+        // Explicit always — execute unconditionally.
+        var s = document.createElement('script');
+        Array.from(old.attributes).forEach(function (a) { s.setAttribute(a.name, a.value); });
+        s.textContent = content;
+        old.parentNode.replaceChild(s, old);
+        return;
+      }
+
+      if (spaRun === 'once') {
+        var key = old.getAttribute('data-spa-id') || _hashStr(content);
+        if (_onceScripts.has(key)) {
+          old.parentNode && old.parentNode.removeChild(old);
+          return;
+        }
+        _onceScripts.add(key);
+        var s = document.createElement('script');
+        Array.from(old.attributes).forEach(function (a) { s.setAttribute(a.name, a.value); });
+        s.textContent = content;
+        old.parentNode.replaceChild(s, old);
+        return;
+      }
+
+      // No data-spa-run attribute (including inline modules):
+      // Remove from DOM; do not execute. The initial page-load already ran it.
+      old.parentNode && old.parentNode.removeChild(old);
+    });
+  }
+
+  // ── Utilities ──────────────────────────────────────────────────────────
+
+  function resolveEl(target) {
+    if (!target) return document.getElementById('breeze-app') ||
+                         document.querySelector('main') ||
+                         document.body;
+    if (typeof target === 'string') return document.querySelector(target);
+    return target;
+  }
+
+  // Swap innerHTML of el, then run scripts with smart de-duplication.
+  function swap(el, html) {
+    el.innerHTML = html;
+    _runScripts(el);
+  }
+
+  // ── Core fetch helper ──────────────────────────────────────────────────
+
+  async function breezeGet(url, target, options) {
+    options = options || {};
+    var el = resolveEl(target);
+
+    try {
+      var res = await fetch(url, {
+        method:      options.method  || 'GET',
+        body:        options.body    || undefined,
+        credentials: 'same-origin',
+        headers: Object.assign(
+          { 'X-Breeze-Fragment': 'true' },
+          options.headers || {}
+        ),
+      });
+
+      var html = await res.text();
+
+      if (!res.ok) {
+        if (options.onError) { options.onError(res, el); }
+        return html;
+      }
+
+      if (el) { swap(el, html); }
+      if (options.onSuccess) { options.onSuccess(html, el); }
+
+      window.dispatchEvent(new CustomEvent('breeze:update', {
+        detail: { url: url, target: target, html: html }
+      }));
+
+      return html;
+    } catch (e) {
+      if (options.onError) { options.onError(e, el); }
+      throw e;
+    }
+  }
+
+  // ── Polling ────────────────────────────────────────────────────────────
+
+  var _polls = new WeakMap();
+
+  function breezePoll(url, target, intervalMs, options) {
+    var el = resolveEl(target);
+    if (!el) { console.warn('breeze.poll: target not found', target); return; }
+    breezeStop(el);
+    breezeGet(url, el, options);
+    var id = setInterval(function () { breezeGet(url, el, options); }, intervalMs || 5000);
+    _polls.set(el, id);
+  }
+
+  function breezeStop(target) {
+    var el = resolveEl(target);
+    if (!el) return;
+    var id = _polls.get(el);
+    if (id !== undefined) { clearInterval(id); _polls.delete(el); }
+  }
+
+  // ── SPA navigation ─────────────────────────────────────────────────────
+
+  function getAppTarget() {
+    return document.getElementById('breeze-app') ||
+           document.querySelector('main') ||
+           document.body;
+  }
+
+  async function navigate(url, push) {
+    // Before hook — returning false cancels navigation.
+    if (_runHooks('beforeNavigate', { url: url }) === false) return;
+
+    _loadingStart();
+    try {
+      var res = await fetch(url, {
+        headers: { 'X-Breeze-Partial': 'true' },
+        credentials: 'same-origin',
+      });
+
+      if (!res.ok) { window.location.href = url; return; }
+
+      var html = await res.text();
+      var target = getAppTarget();
+      swap(target, html);
+
+      if (push) { history.pushState({ breezeUrl: url }, '', url); }
+
+      window.dispatchEvent(new CustomEvent('breeze:navigate', { detail: { url: url } }));
+      window.scrollTo(0, 0);
+
+      _runHooks('afterNavigate', { url: url });
+    } catch (e) {
+      window.location.href = url;
+    } finally {
+      _loadingEnd();
+    }
+  }
+
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest('a[href]');
+    if (!a) return;
+    var href = a.getAttribute('href');
+    if (!href) return;
+    if (
+      a.hasAttribute('data-no-spa') || a.hasAttribute('target') ||
+      href.startsWith('http') || href.startsWith('//') ||
+      href.startsWith('#')    || href.startsWith('mailto:') ||
+      href.startsWith('tel:')
+    ) return;
+
+    e.preventDefault();
+    var targetUrl = new URL(href, window.location.origin).pathname;
+    if (targetUrl === window.location.pathname && !href.includes('?')) return;
+    navigate(href, true);
+  });
+
+  window.addEventListener('popstate', function () {
+    navigate(window.location.pathname + window.location.search, false);
+  });
+
+  if (!history.state || !history.state.breezeUrl) {
+    history.replaceState(
+      { breezeUrl: window.location.pathname + window.location.search },
+      '',
+      window.location.pathname + window.location.search
+    );
+  }
+
+  // ── SPA form handling ──────────────────────────────────────────────────
+  //
+  // Intercepts form submits unless:
+  //   - target="_blank"
+  //   - enctype="multipart/form-data" (file uploads — let browser handle)
+  //   - data-spa="false" (explicit opt-out)
+  //   - action is an external URL (different origin)
+  //   - the form has a [download] attribute (unusual but guard it)
+  //
+  // GET forms:
+  //   Serialise with URLSearchParams, navigate via SPA router.
+  //
+  // POST forms:
+  //   Use fetch(). Content-Type negotiation:
+  //     application/x-www-form-urlencoded (default)
+  //     application/json (if form has data-content-type="application/json")
+  //     text/plain       (if form has data-content-type="text/plain")
+  //   Response HTML is swapped into #breeze-app exactly like a navigation.
+  //   History is pushed with the form's action URL.
+  //
+  // Progressive enhancement: if JS is disabled the form submits normally.
+
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!form || form.tagName !== 'FORM') return;
+
+    // ── Opt-out conditions ───────────────────────────────────────────────
+    if (form.getAttribute('data-spa') === 'false') return;
+    if (form.getAttribute('target') === '_blank')  return;
+    if ((form.getAttribute('enctype') || '').toLowerCase() === 'multipart/form-data') return;
+
+    var rawAction = form.getAttribute('action') || window.location.pathname;
+    // External action → let browser handle.
+    try {
+      var actionUrl = new URL(rawAction, window.location.origin);
+      if (actionUrl.origin !== window.location.origin) return;
+    } catch (_) { return; }
+
+    e.preventDefault();
+
+    var method = (form.getAttribute('method') || 'GET').toUpperCase();
+    var data   = new FormData(form);
+
+    // Before hook — returning false cancels submission.
+    if (_runHooks('beforeSubmit', { form: form, url: rawAction }) === false) return;
+
+    _loadingStart();
+
+    if (method === 'GET') {
+      // GET: serialise to query string and navigate.
+      var params = new URLSearchParams();
+      data.forEach(function (val, key) { params.append(key, val); });
+      var qs  = params.toString();
+      var url = actionUrl.pathname + (qs ? '?' + qs : '');
+      navigate(url, true).finally(_loadingEnd);
+      return;
+    }
+
+    // POST (and PUT/PATCH/DELETE via method override if present).
+    var contentType = (form.getAttribute('data-content-type') || '').toLowerCase().trim();
+    var body, ct;
+
+    if (contentType === 'application/json') {
+      // Convert FormData to a plain object for JSON serialisation.
+      var obj = {};
+      data.forEach(function (val, key) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) {
+          if (!Array.isArray(obj[key])) obj[key] = [obj[key]];
+          obj[key].push(val);
+        } else {
+          obj[key] = val;
+        }
+      });
+      body = JSON.stringify(obj);
+      ct   = 'application/json';
+    } else if (contentType === 'text/plain') {
+      var lines = [];
+      data.forEach(function (val, key) { lines.push(key + '=' + val); });
+      body = lines.join('\n');
+      ct   = 'text/plain';
+    } else {
+      // Default: application/x-www-form-urlencoded.
+      body = new URLSearchParams(data).toString();
+      ct   = 'application/x-www-form-urlencoded';
+    }
+
+    fetch(actionUrl.pathname, {
+      method:      method,
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type':     ct,
+        'X-Breeze-Partial': 'true',
+      },
+      body: body,
+    }).then(function (res) {
+      return res.text().then(function (html) {
+        if (!res.ok) {
+          // Server error — fall back to a real navigation so the user sees it.
+          window.location.href = actionUrl.pathname;
+          return;
+        }
+        var target = getAppTarget();
+        swap(target, html);
+        history.pushState({ breezeUrl: actionUrl.pathname }, '', actionUrl.pathname);
+        window.scrollTo(0, 0);
+        window.dispatchEvent(new CustomEvent('breeze:navigate', { detail: { url: actionUrl.pathname } }));
+        _runHooks('afterSubmit', { form: form, url: actionUrl.pathname, html: html });
+      });
+    }).catch(function () {
+      // Network failure — fall back to normal browser submit.
+      form.submit();
+    }).finally(function () {
+      _loadingEnd();
+    });
+  });
+
+  // ── Reactive data store ────────────────────────────────────────────────
+
+  var _store    = null;
+  var _watchers = [];
+
+  function _readDataTag() {
+    var el = document.getElementById('__breeze_data__');
+    if (!el) return {};
+    try { return JSON.parse(el.textContent); } catch(e) { return {}; }
+  }
+
+  function _notifyWatchers(data) {
+    for (var i = 0; i < _watchers.length; i++) {
+      try { _watchers[i](data); } catch(e) { console.error('breeze.watch callback error', e); }
+    }
+  }
+
+  // ── Client-side Go-template evaluator (unchanged) ──────────────────────
+
+  var _tmplCache = null;
+
+  function _tmplSources() {
+    if (_tmplCache) return _tmplCache;
+    var el = document.getElementById('__breeze_tmpl__');
+    if (!el) { _tmplCache = {}; return _tmplCache; }
+    try { _tmplCache = JSON.parse(el.textContent); } catch(e) { _tmplCache = {}; }
+    return _tmplCache;
+  }
+
+  function _resolvePath(path, ctx) {
+    var p = path.trim();
+    if (p === '.' || p === '') return ctx;
+    if (p[0] === '.') p = p.slice(1);
+    var parts = p.split('.');
+    var val = ctx;
+    for (var i = 0; i < parts.length; i++) {
+      if (val == null) return undefined;
+      val = val[parts[i]];
+    }
+    return val;
+  }
+
+  function _evalTmpl(src, ctx, sources, depth) {
+    depth = depth || 0;
+    if (depth > 16) return '';
+
+    var out = '';
+    var pos = 0;
+
+    while (pos < src.length) {
+      var open = src.indexOf('{{', pos);
+      if (open === -1) { out += src.slice(pos); break; }
+      out += src.slice(pos, open);
+
+      var close = src.indexOf('}}', open + 2);
+      if (close === -1) { out += src.slice(open); break; }
+
+      var tag = src.slice(open + 2, close).trim();
+      pos = close + 2;
+
+      if (tag.slice(0, 2) === '/*') continue;
+
+      if (tag.slice(0, 5) === 'range') {
+        var rangePath = tag.slice(5).trim();
+        var block = _extractBlock(src, pos, 'range');
+        pos = block.end;
+        var items = _resolvePath(rangePath, ctx);
+        if (Array.isArray(items)) {
+          for (var ri = 0; ri < items.length; ri++) {
+            out += _evalTmpl(block.body, items[ri], sources, depth + 1);
+          }
+        } else if (items && typeof items === 'object') {
+          var keys = Object.keys(items);
+          for (var ki = 0; ki < keys.length; ki++) {
+            out += _evalTmpl(block.body, items[keys[ki]], sources, depth + 1);
+          }
+        }
+        continue;
+      }
+
+      if (tag.slice(0, 2) === 'if') {
+        var ifExpr = tag.slice(2).trim();
+        var negate = false;
+        if (ifExpr.slice(0, 3) === 'not') { negate = true; ifExpr = ifExpr.slice(3).trim(); }
+        var block = _extractBlock(src, pos, 'if');
+        pos = block.end;
+        var val = _resolvePath(ifExpr, ctx);
+        var truthy = !!(Array.isArray(val) ? val.length : val);
+        if (negate) truthy = !truthy;
+        if (truthy) out += _evalTmpl(block.body, ctx, sources, depth + 1);
+        continue;
+      }
+
+      if (tag === 'end') continue;
+
+      if (tag.slice(0, 9) === 'component' || tag.slice(0, 7) === 'partial') {
+        var rest = tag.slice(tag[0] === 'c' ? 9 : 7).trim();
+        var q = rest[0];
+        if (q === '"' || q === "'") {
+          var nameEnd  = rest.indexOf(q, 1);
+          var compName = rest.slice(1, nameEnd);
+          var dataExpr = rest.slice(nameEnd + 1).trim();
+          var compData = dataExpr ? _resolvePath(dataExpr, ctx) : ctx;
+          var compSrc  = sources[compName];
+          if (compSrc !== undefined) {
+            out += _evalTmpl(compSrc, compData, sources, depth + 1);
+          }
+        }
+        continue;
+      }
+
+      if (tag[0] === '.') {
+        var resolved = _resolvePath(tag, ctx);
+        if (resolved != null) out += String(resolved);
+        continue;
+      }
+    }
+
+    return out;
+  }
+
+  function _extractBlock(src, pos, tag) {
+    var depth = 1;
+    var body  = '';
+    var i     = pos;
+
+    while (i < src.length) {
+      var open  = src.indexOf('{{', i);
+      if (open === -1) break;
+      var close = src.indexOf('}}', open + 2);
+      if (close === -1) break;
+
+      var inner = src.slice(open + 2, close).trim();
+
+      if (inner.slice(0, tag.length) === tag) {
+        depth++;
+        body += src.slice(i, close + 2);
+        i = close + 2;
+      } else if (inner === 'end') {
+        depth--;
+        if (depth === 0) { body += src.slice(i, open); return { body: body, end: close + 2 }; }
+        body += src.slice(i, close + 2);
+        i = close + 2;
+      } else {
+        body += src.slice(i, close + 2);
+        i = close + 2;
+      }
+    }
+
+    return { body: body, end: i };
+  }
+
+  function _rerender(name, data, target) {
+    var el      = resolveEl(target);
+    var sources = _tmplSources();
+
+    if (sources[name] !== undefined) {
+      var html = _evalTmpl(sources[name], data, sources, 0);
+      if (el) { swap(el, html); }
+      window.dispatchEvent(new CustomEvent('breeze:render', {
+        detail: { name: name, target: target, html: html, local: true }
+      }));
+      return Promise.resolve(html);
+    }
+
+    function postRender(body) {
+      return fetch('/breeze/render', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    }
+
+    return postRender({ component: name, data: data })
+      .then(function(res) {
+        if (res.status === 400) return postRender({ view: name, data: data });
+        return res;
+      })
+      .then(function(res) {
+        return res.text().then(function(html) {
+          if (!res.ok) { console.error('breeze.render error:', html); return html; }
+          if (el) { swap(el, html); }
+          window.dispatchEvent(new CustomEvent('breeze:render', {
+            detail: { name: name, target: target, html: html, local: false }
+          }));
+          return html;
+        });
+      });
+  }
+
+  // ── Public API ─────────────────────────────────────────────────────────
+
+  window.Breeze = {
+    // Lifecycle hooks — register before navigation/submit events fire.
+    //
+    // Breeze.onBeforeNavigate(fn({ url }))     — return false to cancel
+    // Breeze.onAfterNavigate(fn({ url }))
+    // Breeze.onBeforeSubmit(fn({ form, url })) — return false to cancel
+    // Breeze.onAfterSubmit(fn({ form, url, html }))
+    //
+    // Example:
+    //   Breeze.onBeforeNavigate(function(e) {
+    //     console.log('navigating to', e.url);
+    //   });
+    onBeforeNavigate: function(fn) { _hooks.beforeNavigate.push(fn); },
+    onAfterNavigate:  function(fn) { _hooks.afterNavigate.push(fn);  },
+    onBeforeSubmit:   function(fn) { _hooks.beforeSubmit.push(fn);   },
+    onAfterSubmit:    function(fn) { _hooks.afterSubmit.push(fn);    },
+  };
+
+  window.breeze = {
+    fetch:    breezeGet,
+    poll:     breezePoll,
+    stop:     breezeStop,
+    swap:     function(target, html) { swap(resolveEl(target), html); },
+    navigate: function(url) { navigate(url, true); },
+
+    data: function(key) {
+      var d = _store !== null ? _store : _readDataTag();
+      if (_store === null) _store = d;
+      return key ? (d && typeof d === 'object' ? d[key] : undefined) : d;
+    },
+
+    setData: function(newData, target, name) {
+      _store = newData;
+      _notifyWatchers(newData);
+      if (name) { return _rerender(name, newData, target); }
+      return Promise.resolve(newData);
+    },
+
+    render: function(name, data, target) {
+      return _rerender(name, data !== undefined ? data : _store, target);
+    },
+
+    watch: function(fn) {
+      _watchers.push(fn);
+      return function() { _watchers = _watchers.filter(function(w) { return w !== fn; }); };
+    },
+
+    ws: function(path, handlers) {
+      handlers = handlers || {};
+      var delay = 1000, maxDelay = 30000, stopped = false, socket = null;
+      var proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      var url   = proto + '://' + location.host + path;
+
+      function connect() {
+        socket = new WebSocket(url);
+
+        socket.addEventListener('open', function(e) {
+          delay = 1000;
+          if (handlers.onOpen) handlers.onOpen(e);
+          window.dispatchEvent(new CustomEvent('breeze:ws:open', { detail: { path: path } }));
+        });
+
+        socket.addEventListener('message', function(e) {
+          if (handlers.onMessage) handlers.onMessage(e);
+          window.dispatchEvent(new CustomEvent('breeze:ws:message', {
+            detail: { data: e.data, path: path }
+          }));
+        });
+
+        socket.addEventListener('close', function(e) {
+          if (handlers.onClose) handlers.onClose(e);
+          window.dispatchEvent(new CustomEvent('breeze:ws:close', {
+            detail: { path: path, code: e.code }
+          }));
+          if (!stopped) {
+            setTimeout(connect, delay);
+            delay = Math.min(delay * 2, maxDelay);
+          }
+        });
+
+        socket.addEventListener('error', function(e) {
+          if (handlers.onError) handlers.onError(e);
+        });
+      }
+
+      connect();
+
+      return {
+        send:  function(msg) {
+          if (socket && socket.readyState === WebSocket.OPEN) socket.send(msg);
+        },
+        close: function() { stopped = true; if (socket) socket.close(); },
+        get socket() { return socket; },
+      };
+    },
+  };
+
+})();
+</script>
+`
+}
+
+
+// breezeDataScript wraps the page JSON in a non-executing script tag so the
+// client can read it with breeze.data() without it polluting the global scope.
+func breezeDataScript(dataJSON []byte) string {
+	return `<script id="__breeze_data__" type="application/json">` +
+		string(dataJSON) +
+		`</script>` + "\n"
+}
+
+// ─── Preload ──────────────────────────────────────────────────────────────────
+
+// Preload parses all view and component templates eagerly.
+// Call this at startup (after all routes are registered) to surface template
+// errors early and warm the cache before the first request.
+func (te *TemplateEngine) Preload() error {
+	// Load components.
+	compFiles, _ := filepath.Glob(filepath.Join(te.compDir, "*.html"))
+	for _, cf := range compFiles {
+		name := strings.TrimSuffix(filepath.Base(cf), ".html")
+		t, err := te.parseComponent(name)
+		if err != nil {
+			return fmt.Errorf("breeze/template: preload component %q: %w", name, err)
+		}
+		te.mu.Lock()
+		te.components[name] = t
+		te.mu.Unlock()
+	}
+
+	// Load views.
+	viewFiles, _ := filepath.Glob(filepath.Join(te.viewsDir, "*.html"))
+	for _, vf := range viewFiles {
+		base := filepath.Base(vf)
+		// Skip the layout file itself.
+		if te.layoutFile != "" {
+			if abs, _ := filepath.Abs(vf); abs == func() string { a, _ := filepath.Abs(te.layoutFile); return a }() {
+				continue
+			}
+		}
+		name := strings.TrimSuffix(base, ".html")
+		t, err := te.parseView(name)
+		if err != nil {
+			return fmt.Errorf("breeze/template: preload view %q: %w", name, err)
+		}
+		te.mu.Lock()
+		te.templates[name] = t
+		te.mu.Unlock()
+	}
+
+	return nil
+}

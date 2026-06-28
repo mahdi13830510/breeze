@@ -93,7 +93,7 @@ func main() {
 		JSONPath:    "/swagger.json",
 		UIPath:      "/swagger",
 	}))
-
+	router.ServeStatic("/files", "./files/")
 	router.Handle(breeze.GET, "/users", listUsers,
 		middleware.DocGET("/users", swagger.RouteDoc{
 			Title:       "List users",

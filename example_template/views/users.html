@@ -1,0 +1,109 @@
+{{define "content"}}
+<div class="page">
+  <h1>Users</h1>
+
+  <div id="users-table">
+    {{component "users-table" .Data}}
+  </div>
+
+  <div class="add-form">
+    <input id="new-name"  type="text" placeholder="Name" />
+    <input id="new-email" type="text" placeholder="Email" />
+    <button onclick="addUser()">+ Add user</button>
+  </div>
+
+  <div id="ws-log-box">
+    {{component "ws-log" (map)}}
+  </div>
+</div>
+
+<script>
+  // ── Two independent reactive stores ───────────────────────────────────
+  //
+  // _users  — the user list, seeded from server JSON, drives #users-table
+  // _logs   — WS event log entries, starts empty, drives #ws-log-box
+  //
+  // Both are updated exclusively through breeze.render(), which evaluates
+  // the component template client-side (from __breeze_tmpl__) and swaps
+  // the DOM. No manual DOM writes anywhere.
+
+  var _users = breeze.data();   // []User seeded from __breeze_data__
+  var _logs  = [];              // []string, purely client-side
+
+  function pushLog(msg) {
+    _logs.unshift('[' + new Date().toLocaleTimeString() + '] ' + msg);
+    breeze.render('ws-log', _logs, '#ws-log-box');
+  }
+
+  function addUser() {
+    var name  = document.getElementById('new-name').value.trim();
+    var email = document.getElementById('new-email').value.trim();
+    if (!name || !email) return;
+
+    var newUser = { ID: String(_users.length + 1), Name: name, Email: email };
+    _users.push(newUser);
+
+    // Re-render the table locally — no server round-trip.
+    breeze.render('users-table', _users, '#users-table');
+
+    // Persist to the server so the change survives a refresh.
+    fetch('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newUser),
+      credentials: 'same-origin',
+    });
+
+    // Broadcast to other clients via WS.
+    chat.send(JSON.stringify({ event: 'user:added', user: newUser }));
+
+    document.getElementById('new-name').value  = '';
+    document.getElementById('new-email').value = '';
+  }
+
+  // ── WebSocket ─────────────────────────────────────────────────────────
+  //
+  // When another client adds a user, onMessage updates _users and re-renders
+  // the table — exactly the same path as addUser(), just triggered remotely.
+
+  var chat = breeze.ws('/ws', {
+    onOpen: function() {
+      pushLog('Connected to /ws');
+    },
+    onMessage: function(e) {
+      try {
+        var msg = JSON.parse(e.data);
+        if (msg.event === 'user:added') {
+          _users.push(msg.user);
+          breeze.render('users-table', _users, '#users-table');
+          pushLog('New user from another client: ' + msg.user.Name);
+        } else {
+          pushLog(e.data);
+        }
+      } catch(_) {
+        pushLog(e.data);
+      }
+    },
+    onClose: function() { pushLog('Disconnected — reconnecting...'); },
+  });
+</script>
+
+<style>
+  .page h1 { font-size: 2rem; margin-bottom: 1.5rem; }
+  table { width: 100%; border-collapse: collapse; background: #fff;
+          border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  th { background: #1a1a2e; color: #fff; padding: .75rem 1rem; text-align: left; font-size: .85rem; }
+  td { padding: .75rem 1rem; border-bottom: 1px solid #f0f0f0; }
+  tr:last-child td { border-bottom: none; }
+  .add-form { display: flex; gap: .75rem; margin-top: 1.25rem; flex-wrap: wrap; }
+  .add-form input { padding: .5rem .75rem; border: 1px solid #ddd; border-radius: 6px;
+                    font-size: .95rem; flex: 1; min-width: 140px; }
+  .add-form button { padding: .5rem 1.1rem; background: #1a1a2e; color: #fff;
+                     border: none; border-radius: 6px; cursor: pointer; }
+  .add-form button:hover { background: #7c83fd; }
+  .ws-log { margin-top: 1.5rem; background: #1a1a2e; color: #eee; border-radius: 8px;
+            padding: 1rem 1.25rem; font-size: .85rem; max-height: 160px; overflow-y: auto; }
+  .ws-log strong { color: #7c83fd; display: block; margin-bottom: .5rem; }
+  #ws-messages p { margin: .2rem 0; font-family: monospace; color: #aaa; }
+</style>
+{{end}}

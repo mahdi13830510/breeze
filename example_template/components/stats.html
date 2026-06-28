@@ -1,0 +1,14 @@
+{{define "stats"}}
+<div class="stats-widget">
+  <span class="label">Active users</span>
+  <span class="count">{{.Count}}</span>
+  <span class="updated">updated {{.Time}}</span>
+</div>
+
+<style>
+  .stats-widget { display: flex; align-items: center; gap: 1rem; background: #1a1a2e;
+                  color: #fff; border-radius: 8px; padding: .75rem 1.25rem; font-size: .9rem; }
+  .stats-widget .count { font-size: 1.5rem; font-weight: 700; color: #7c83fd; }
+  .stats-widget .updated { color: #888; font-size: .8rem; margin-left: auto; }
+</style>
+{{end}}

@@ -1,0 +1,14 @@
+{{define "users-table"}}
+<table>
+  <thead><tr><th>ID</th><th>Name</th><th>Email</th></tr></thead>
+  <tbody>
+    {{range .}}
+    <tr>
+      <td>{{.ID}}</td>
+      <td>{{.Name}}</td>
+      <td>{{.Email}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}

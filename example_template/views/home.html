@@ -1,0 +1,99 @@
+{{define "content"}}
+<div class="page">
+  <h1>Welcome to Breeze 🌊</h1>
+  <p>SPA navigation, live fragments, server-rendered components, and form handling.</p>
+
+  {{/* ── Live stats — auto-refreshes every 2 seconds via breeze.poll ── */}}
+  <div id="stats-box">
+    {{component "stats" (map "Count" 0 "Time" "loading...")}}
+  </div>
+
+  <div class="actions">
+    <button onclick="breeze.fetch('/fragments/stats', '#stats-box')">↺ Refresh now</button>
+    <button onclick="breeze.stop('#stats-box')">⏸ Pause</button>
+    <button onclick="breeze.poll('/fragments/stats', '#stats-box', 2000)">▶ Resume</button>
+  </div>
+
+  {{/* ── SPA search form (GET) ── */}}
+  <div class="demo-section">
+    <h2>SPA Form — GET</h2>
+    <p>Serialises the query string and navigates without a page reload.</p>
+    <form action="/search" method="GET">
+      <input name="q" type="text" placeholder="Search…" />
+      <button type="submit">Search</button>
+    </form>
+  </div>
+
+  {{/* ── SPA contact form (POST, x-www-form-urlencoded) ── */}}
+  <div class="demo-section">
+    <h2>SPA Form — POST</h2>
+    <p>Submitted via fetch; response HTML swapped into #breeze-app. No reload.</p>
+    <form action="/contact" method="POST">
+      <input name="name"    type="text"  placeholder="Your name"  required />
+      <input name="message" type="text"  placeholder="Message"    required />
+      <button type="submit">Send</button>
+    </form>
+  </div>
+
+  {{/* ── Opt-out: this form does a real browser submit ── */}}
+  <div class="demo-section">
+    <h2>Regular Form (data-spa="false")</h2>
+    <p>Full browser submit — SPA interception is skipped.</p>
+    <form action="/download" method="POST" data-spa="false">
+      <button type="submit">Download (normal submit)</button>
+    </form>
+  </div>
+
+  {{component "card" (map "title" "breeze.fetch(url, target)" "body" "Fetch a fragment endpoint and swap it into any element. One line of JS, no page reload.")}}
+  {{component "card" (map "title" "breeze.poll(url, target, ms)" "body" "Auto-refresh a fragment on an interval. Great for live counters, feeds, or dashboards.")}}
+  {{component "card" (map "title" "SPA Forms" "body" "GET forms navigate, POST forms fetch and swap. multipart/form-data and data-spa=false are excluded automatically.")}}
+</div>
+
+{{/*
+  data-spa-run="always"  → runs on every SPA navigation (safe: sets up polling)
+  data-spa-run="once"    → runs once per page lifecycle (analytics, init)
+  no attribute           → runs only on hard page load (default, safe for WS)
+*/}}
+<script data-spa-run="always">
+  setTimeout(() => {
+      breeze.poll('/fragments/stats', '#stats-box', 2000);
+  }, 1);
+</script>
+
+<script data-spa-run="once">
+  setTimeout(() => {
+    console.log(Breeze);
+    
+      Breeze.onAfterNavigate(function(e) {
+    console.log('[Breeze] navigated to', e.url);
+     });
+     Breeze.onAfterSubmit(function(e) {
+       console.log('[Breeze] form submitted to', e.url);
+     });
+  }, 1);
+  // One-time initialisation — only fires on first visit, not on back-navigation.
+
+</script>
+
+<style>
+  .page h1 { font-size: 2.5rem; margin-bottom: .5rem; }
+  .page > p { color: #666; margin-bottom: 1.5rem; }
+  #stats-box { margin-bottom: 1.5rem; }
+  .actions { display: flex; gap: .75rem; margin-bottom: 2rem; flex-wrap: wrap; }
+  .actions button { padding: .5rem 1.1rem; border: none; border-radius: 6px;
+                    background: #1a1a2e; color: #fff; cursor: pointer; font-size: .9rem; }
+  .actions button:hover { background: #7c83fd; }
+  .demo-section { background: #fff; border: 1px solid #e0e0e0; border-radius: 10px;
+                  padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; }
+  .demo-section h2 { font-size: 1rem; margin-bottom: .3rem; color: #1a1a2e; }
+  .demo-section p  { color: #666; font-size: .9rem; margin-bottom: .75rem; }
+  .demo-section form { display: flex; gap: .5rem; flex-wrap: wrap; }
+  .demo-section input { padding: .4rem .75rem; border: 1px solid #ddd; border-radius: 6px;
+                         font-size: .9rem; flex: 1; min-width: 120px; }
+  .demo-section button { padding: .4rem 1rem; background: #1a1a2e; color: #fff;
+                          border: none; border-radius: 6px; cursor: pointer; }
+  .demo-section button:hover { background: #7c83fd; }
+  /* Loading state — shown while any navigation or form fetch is in-flight */
+  body.breeze-loading #breeze-app { opacity: 0.55; transition: opacity .15s; }
+</style>
+{{end}}

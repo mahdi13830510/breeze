@@ -1,0 +1,10 @@
+{{define "ws-log"}}
+<div class="ws-log">
+  <strong>WebSocket log</strong>
+  <div id="ws-messages">
+    {{range .}}
+    <p>{{.}}</p>
+    {{end}}
+  </div>
+</div>
+{{end}}
