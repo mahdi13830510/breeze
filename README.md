@@ -1,8 +1,18 @@
+<div align="center">
+
 # Breeze
 
-> **A ridiculously fast, event-driven Go web framework built for maximum
-> throughput, minimal allocations, native WebSockets, and
-> production-ready APIs.**
+**A ridiculously fast, event-driven Go web framework built for maximum
+throughput, minimal allocations, native WebSockets, and
+production-ready APIs.**
+
+[![Documentation](https://img.shields.io/badge/Documentation-Latest-blue?style=for-the-badge)](https://nelthaarion.github.io/breeze)
+[![GitHub](https://img.shields.io/badge/GitHub-nelthaarion%2Fbreeze-181717?style=for-the-badge&logo=github)](https://github.com/nelthaarion/breeze)
+[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](./LICENSE)
+
+</div>
+
+---
 
 Breeze is a modern, high-performance Go web framework engineered for
 developers who demand speed without sacrificing developer experience.
@@ -14,129 +24,206 @@ Whether you're building microservices, real-time applications, or
 high-throughput APIs, Breeze is designed to handle millions of requests
 efficiently while keeping your code clean and maintainable.
 
-------------------------------------------------------------------------
+## Table of Contents
 
-# 🚀 Installation
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Features](#features)
+  - [Built for Extreme Performance](#-built-for-extreme-performance)
+  - [High-Performance Routing](#-high-performance-routing)
+  - [Native WebSocket Engine](#-native-websocket-engine)
+  - [Built-in OpenAPI / Swagger](#-built-in-openapi--swagger)
+  - [Production Middleware](#-production-middleware)
+  - [Built-in Developer Dashboard](#-built-in-developer-dashboard)
+  - [Developer Experience](#-developer-experience)
+  - [Performance Optimizations](#-performance-optimizations)
+- [Support the Project](#-support-the-project)
+- [Contributing](#-contributing)
+- [License](#license)
 
-## Install
+## Installation
 
-``` bash
+Requires **Go 1.24.3** or later.
+
+```bash
 go get github.com/nelthaarion/breeze
 ```
- 
 
-------------------------------------------------------------------------
+The module pulls in **gnet v2** for the event loop, **go-json** for fast
+JSON marshaling, **brotli** for compression, and **golang-jwt/jwt** for
+authentication.
 
- [![Documentation](https://img.shields.io/badge/Documentation-Latest-blue?style=for-the-badge)](https://nelthaarion.github.io/breeze)
+📖 **Full documentation:** <https://nelthaarion.github.io/breeze>
 
-------------------------------------------------------------------------
+## Quick Start
 
+A complete working server in under 20 lines:
 
+```go
+package main
 
-------------------------------------------------------------------------
+import (
+    "runtime"
 
- Support us ❤️
- 
- <img width="185" height="215" alt="download" src="https://github.com/user-attachments/assets/def5c7fc-4c6e-480b-91a4-2a574f23a533" />
+    "github.com/nelthaarion/breeze"
+    middleware "github.com/nelthaarion/breeze/middlewares"
+)
 
- Or 
+func main() {
+    router := breeze.NewRouter()
 
- USDT Address (BEP20): 0x2EF70423BC989C5203c9031811179DD6EDe32793
+    router.Use(middleware.RecoveryMiddleware())
+    router.Use(middleware.LoggingMiddleware())
 
-------------------------------------------------------------------------
+    router.Handle(breeze.GET, "/", func(ctx *breeze.Context) {
+        ctx.JSON(map[string]string{"status": "ok"})
+    })
 
-# ✨ Features
+    router.Handle(breeze.GET, "/users/:id", func(ctx *breeze.Context) {
+        ctx.JSON(map[string]string{"id": ctx.Param("id")})
+    })
+
+    pool := breeze.NewWorkerPool(runtime.NumCPU())
+    app  := breeze.New(router, pool)
+    app.Run(3000, true) // port, multiCore
+}
+```
+
+Run it:
+
+```bash
+go run main.go
+# → curl http://localhost:3000/        → {"status":"ok"}
+# → curl http://localhost:3000/users/42 → {"id":"42"}
+```
+
+## Features
 
 ### 🚀 Built for Extreme Performance
 
--   ⚡ Event-driven architecture powered by `gnet`
--   🧠 Zero-copy HTTP request parsing where possible
--   📦 Minimal allocations with `sync.Pool`
--   🔥 Optimized response serialization (no `fmt.Sprintf`)
--   💨 Lock-free fast paths for critical operations
--   🎯 Preallocated buffers & cached status codes
--   📈 Worker Pool for scalable request processing
+- ⚡ Event-driven architecture powered by `gnet`
+- 🧠 Zero-copy HTTP request parsing where possible
+- 📦 Minimal allocations with `sync.Pool`
+- 🔥 Optimized response serialization (no `fmt.Sprintf`)
+- 💨 Lock-free fast paths for critical operations
+- 🎯 Preallocated buffers & cached status codes
+- 📈 Worker Pool for scalable request processing
 
 ### 🌐 High-Performance Routing
 
--   ⚡ Fast HTTP router
--   🎯 Dynamic route parameters
--   🌲 Wildcard routing
--   📂 Static file serving
--   🧩 Global middleware pipeline
--   🔍 Optimized route matching
+- ⚡ Fast HTTP router
+- 🎯 Dynamic route parameters
+- 🌲 Wildcard routing
+- 📂 Static file serving
+- 🧩 Global middleware pipeline
+- 🔍 Optimized route matching
 
 ### 🔌 Native WebSocket Engine
 
--   ⚡ Zero-overhead HTTP → WebSocket upgrade
--   🔥 Dedicated WebSocket fast path
--   📡 Binary & Text frames
--   ❤️ Ping / Pong support
--   🔄 Fragmented frame handling
--   🚪 Graceful close frames
--   🧵 Concurrent connection management
+- ⚡ Zero-overhead HTTP → WebSocket upgrade
+- 🔥 Dedicated WebSocket fast path
+- 📡 Binary & Text frames
+- ❤️ Ping / Pong support
+- 🔄 Fragmented frame handling
+- 🚪 Graceful close frames
+- 🧵 Concurrent connection management
 
 ### 📚 Built-in OpenAPI / Swagger
 
--   📖 Automatic OpenAPI 3.1 generation
--   📝 Route registration
--   🎯 Schema generation
--   🔍 Typed request & response definitions
--   🌍 Ready for Swagger UI
+- 📖 Automatic OpenAPI 3.1 generation
+- 📝 Route registration
+- 🎯 Schema generation
+- 🔍 Typed request & response definitions
+- 🌍 Ready for Swagger UI
 
 ### 🛡 Production Middleware
 
--   🚦 Rate Limiter
--   🗜 Compression
--   💾 Response Cache
--   🔑 JWT Authentication
--   🌍 CORS
--   🪖 Security Headers
--   📝 Request Logger
--   💥 Panic Recovery
+- 🚦 Rate Limiter
+- 🗜 Compression
+- 💾 Response Cache
+- 🔑 JWT Authentication
+- 🌍 CORS
+- 🪖 Security Headers
+- 📝 Request Logger
+- 💥 Panic Recovery
 
 ### 📊 Built-in Developer Dashboard
 
--   🔧 Native module under `/dashboard` (zero-overhead when disabled)
--   📈 Real-time overview: RPS, latency, memory, goroutines, CPU
--   🛣 Routes Explorer with per-route latency stats
--   🧪 API Explorer with multi-language code generation (curl/Go/JS/Python/C#/PHP)
--   📡 Live Requests feed with WebSocket push
--   🗄 Database Browser (read-only, paginated)
--   🔍 ORM Query Monitor with slow-query detection
--   💾 Cache, Queue, and Scheduler monitors
--   📝 Logs with five tabs (App / HTTP / Errors / Panics / Warnings)
--   ❤️ Health checks with green/yellow/red indicators
--   ⚡ Go runtime performance metrics with charts
--   🕒 Developer Timeline — per-request profiler with expandable steps
--   🔒 HTTP Basic Auth + secret masking (Authorization, Cookie, API keys...)
--   🌑 Modern dark mode, responsive, single-file SPA (no external deps)
+- 🔧 Native module under `/dashboard` (zero-overhead when disabled)
+- 📈 Real-time overview: RPS, latency, memory, goroutines, CPU
+- 🛣 Routes Explorer with per-route latency stats
+- 🧪 API Explorer with multi-language code generation (curl / Go / JS / Python / C# / PHP)
+- 📡 Live Requests feed with WebSocket push
+- 🗄 Database Browser (read-only, paginated)
+- 🔍 ORM Query Monitor with slow-query detection
+- 💾 Cache, Queue, and Scheduler monitors
+- 📝 Logs with five tabs (App / HTTP / Errors / Panics / Warnings)
+- ❤️ Health checks with green / yellow / red indicators
+- ⚡ Go runtime performance metrics with charts
+- 🕒 Developer Timeline — per-request profiler with expandable steps
+- 🔒 HTTP Basic Auth + secret masking (Authorization, Cookie, API keys…)
+- 🌑 Modern dark mode, responsive, single-file SPA (no external deps)
 
 See [`dashboard/README.md`](./dashboard/README.md) for full documentation.
 
 ### ⚙️ Developer Experience
 
--   📦 Lightweight architecture
--   🎨 JSON responses out of the box
--   📄 Template rendering
--   📁 Static assets
--   🔍 Request validation
--   🧩 Simple Context API
+- 📦 Lightweight architecture
+- 🎨 JSON responses out of the box
+- 📄 Template rendering
+- 📁 Static assets
+- 🔍 Request validation
+- 🧩 Simple Context API
 
 ### 🧠 Performance Optimizations
 
--   Zero-copy body handling
--   Header reuse
--   Copy-on-write headers
--   Cached HTTP status text
--   Unsafe string conversions
--   Compact receive buffers
--   Optimized HTTP parser
--   Single-pass header parsing
--   Reduced GC pressure
+- Zero-copy body handling
+- Header reuse
+- Copy-on-write headers
+- Cached HTTP status text
+- Unsafe string conversions
+- Compact receive buffers
+- Optimized HTTP parser
+- Single-pass header parsing
+- Reduced GC pressure
 
-🤝 Contributing
+---
+
+## ❤️ Support the Project
+
+If Breeze saves you time, consider buying me a coffee. Every contribution
+keeps the framework maintained and the benchmarks honest.
+
+<div align="center">
+
+<img width="185" height="215" alt="Support Breeze" src="https://github.com/user-attachments/assets/def5c7fc-4c6e-480b-91a4-2a574f23a533" />
+
+**USDT (BEP20)**
+
+`0x2EF70423BC989C5203c9031811179DD6EDe32793`
+
+</div>
+
+---
+
+## 🤝 Contributing
 
 We welcome contributions of all sizes.
 
-Whether it's fixing bugs, improving documentation, optimizing performance, or adding new features, every contribution helps make Breeze better.
+Whether it's fixing bugs, improving documentation, optimizing
+performance, or adding new features — every contribution helps make
+Breeze better.
+
+1. **Fork** the repository
+2. **Create** a feature branch (`git checkout -b feat/my-thing`)
+3. **Commit** your changes with a clear message
+4. **Open** a pull request describing what and why
+
+Please open an issue first for non-trivial changes so we can align on
+the approach before you spend time on code.
+
+## License
+
+Breeze is released under the [MIT License](./LICENSE).
+
+© Nelthaarion
