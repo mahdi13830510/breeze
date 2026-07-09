@@ -4,7 +4,9 @@ All changes made to the Breeze framework.
 
 ---
 
-## New Features
+## [v1.3.1]
+
+### New Features
 
 ### Developer Dashboard (`/dashboard`)
 
