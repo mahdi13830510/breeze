@@ -1,0 +1,77 @@
+{{define "content"}}
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="login-header">
+      <div class="login-logo">B</div>
+      <h1>Breeze Dashboard</h1>
+      <p>Sign in to continue</p>
+    </div>
+    <form id="login-form" class="login-form" autocomplete="off">
+      <div class="field">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" placeholder="admin" required autofocus>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" placeholder="••••••" required>
+      </div>
+      <div id="login-error" class="login-error" style="display:none"></div>
+      <button type="submit" class="login-btn">Sign In</button>
+    </form>
+    <div class="login-footer">
+      <span>Breeze Framework · Developer Dashboard</span>
+    </div>
+  </div>
+</div>
+<style>
+.login-wrap{display:flex;align-items:center;justify-content:center;min-height:calc(100vh - 0px);background:var(--bg);position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999}
+.login-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:40px;width:380px;max-width:90vw;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.login-header{text-align:center;margin-bottom:28px}
+.login-logo{width:56px;height:56px;border-radius:12px;background:linear-gradient(135deg,var(--primary),var(--purple));display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:28px;margin:0 auto 16px}
+.login-header h1{font-size:20px;font-weight:600;margin-bottom:4px}
+.login-header p{color:var(--text-dim);font-size:13px}
+.login-form .field{margin-bottom:18px}
+.login-form label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-dim);font-weight:600;margin-bottom:6px}
+.login-form input{width:100%;padding:10px 12px;font-size:14px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);outline:none;transition:border-color .15s}
+.login-form input:focus{border-color:var(--primary)}
+.login-error{background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.3);color:var(--err);padding:8px 12px;border-radius:6px;font-size:12px;margin-bottom:14px}
+.login-btn{width:100%;padding:11px;background:var(--primary-dim);color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;transition:background .15s}
+.login-btn:hover{background:var(--primary)}
+.login-btn:disabled{opacity:.6;cursor:wait}
+.login-footer{text-align:center;margin-top:24px;font-size:11px;color:var(--text-muted)}
+</style>
+<script>
+(function(){
+  var form = document.getElementById('login-form');
+  var err = document.getElementById('login-error');
+  var btn = form.querySelector('.login-btn');
+  form.addEventListener('submit', function(e){
+    e.preventDefault();
+    var u = document.getElementById('username').value;
+    var p = document.getElementById('password').value;
+    err.style.display = 'none';
+    btn.disabled = true;
+    btn.textContent = 'Signing in...';
+    fetch('{{.Data.LoginPath}}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: u, password: p})
+    }).then(function(r){return r.json()}).then(function(d){
+      if(d.ok){
+        window.location.href = '{{.Data.BasePath}}';
+      } else {
+        err.textContent = d.error || 'Login failed';
+        err.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = 'Sign In';
+      }
+    }).catch(function(e){
+      err.textContent = 'Network error: ' + e.message;
+      err.style.display = 'block';
+      btn.disabled = false;
+      btn.textContent = 'Sign In';
+    });
+  });
+})();
+</script>
+{{end}}

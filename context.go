@@ -1,8 +1,8 @@
 package breeze
 
 import (
-	"github.com/goccy/go-json"
-	"github.com/panjf2000/gnet/v2"
+        "github.com/goccy/go-json"
+        "github.com/panjf2000/gnet/v2"
 )
 
 // Pre-built common response headers. These are reused across all responses
@@ -10,75 +10,75 @@ import (
 // They are marked read-only by convention — never write to them directly.
 // SetHeader uses the headersShared flag for copy-on-write protection.
 var (
-	hdrsJSON = map[string]string{"Content-Type": "application/json"}
-	hdrsText = map[string]string{"Content-Type": "text/plain"}
-	hdrsHTML = map[string]string{"Content-Type": "text/html; charset=utf-8"}
+        hdrsJSON = map[string]string{"Content-Type": "application/json"}
+        hdrsText = map[string]string{"Content-Type": "text/plain"}
+        hdrsHTML = map[string]string{"Content-Type": "text/html; charset=utf-8"}
 )
 
 type Context struct {
-	Conn        gnet.Conn
-	Req         *HTTPRequest
-	Res         *HTTPResponse
-	params      map[string]string
-	middlewares []HandlerFunc
-	index       int
+        Conn        gnet.Conn
+        Req         *HTTPRequest
+        Res         *HTTPResponse
+        params      map[string]string
+        middlewares []HandlerFunc
+        index       int
 
-	// store is a lazy-initialized typed key-value store for middleware that
-	// need to attach structured data (e.g. JWT claims, user objects) to the
-	// request context. It is nil until the first Set call, so requests that
-	// don't use it pay zero allocation cost.
-	//
-	// FIX: Added so middleware like JWT can store claims as a typed value
-	// instead of a fmt.Sprintf("%v") string that downstream handlers cannot
-	// parse back. This follows the same pattern used by Gin, Echo, and Fiber.
-	store map[string]any
+        // store is a lazy-initialized typed key-value store for middleware that
+        // need to attach structured data (e.g. JWT claims, user objects) to the
+        // request context. It is nil until the first Set call, so requests that
+        // don't use it pay zero allocation cost.
+        //
+        // FIX: Added so middleware like JWT can store claims as a typed value
+        // instead of a fmt.Sprintf("%v") string that downstream handlers cannot
+        // parse back. This follows the same pattern used by Gin, Echo, and Fiber.
+        store map[string]any
 }
 
 // statusOrDefault returns the status code already set on ctx.Res, if any,
 // so that calling Status() before a body method (WriteString/JSON/HTML)
 // is not silently discarded. Falls back to def when no status was set yet.
 func (ctx *Context) statusOrDefault(def int) int {
-	if ctx.Res != nil && ctx.Res.Status != 0 {
-		return ctx.Res.Status
-	}
-	return def
+        if ctx.Res != nil && ctx.Res.Status != 0 {
+                return ctx.Res.Status
+        }
+        return def
 }
 
 func (ctx *Context) WriteString(s string) {
-	ctx.Res = &HTTPResponse{
-		Status:        ctx.statusOrDefault(200),
-		Headers:       hdrsText,
-		Body:          []byte(s),
-		headersShared: true,
-	}
+        ctx.Res = &HTTPResponse{
+                Status:        ctx.statusOrDefault(200),
+                Headers:       hdrsText,
+                Body:          []byte(s),
+                headersShared: true,
+        }
 }
 
 func (ctx *Context) JSON(data any) {
-	d, err := json.Marshal(data)
-	if err != nil {
-		ctx.Res = &HTTPResponse{
-			Status:        ctx.statusOrDefault(400),
-			Headers:       hdrsJSON,
-			Body:          []byte(`{"message":"error parsing json"}`),
-			headersShared: true,
-		}
-		return
-	}
-	ctx.Res = &HTTPResponse{
-		Status:        ctx.statusOrDefault(200),
-		Headers:       hdrsJSON,
-		Body:          d,
-		headersShared: true,
-	}
+        d, err := json.Marshal(data)
+        if err != nil {
+                ctx.Res = &HTTPResponse{
+                        Status:        ctx.statusOrDefault(400),
+                        Headers:       hdrsJSON,
+                        Body:          []byte(`{"message":"error parsing json"}`),
+                        headersShared: true,
+                }
+                return
+        }
+        ctx.Res = &HTTPResponse{
+                Status:        ctx.statusOrDefault(200),
+                Headers:       hdrsJSON,
+                Body:          d,
+                headersShared: true,
+        }
 }
 
 func (ctx *Context) HTML(data []byte) {
-	ctx.Res = &HTTPResponse{
-		Status:        ctx.statusOrDefault(200),
-		Headers:       hdrsHTML,
-		Body:          data,
-		headersShared: true,
-	}
+        ctx.Res = &HTTPResponse{
+                Status:        ctx.statusOrDefault(200),
+                Headers:       hdrsHTML,
+                Body:          data,
+                headersShared: true,
+        }
 }
 
 // Status sets (or overrides) the response status code.
@@ -88,19 +88,19 @@ func (ctx *Context) HTML(data []byte) {
 // preserve any status code already set via Status, so both of these
 // work identically:
 //
-//	ctx.Status(401); ctx.WriteString("nope")
-//	ctx.WriteString("nope"); ctx.Status(401)
+//      ctx.Status(401); ctx.WriteString("nope")
+//      ctx.WriteString("nope"); ctx.Status(401)
 //
 // For bodyless responses (204, 304) call this alone.
 func (ctx *Context) Status(code int) {
-	if ctx.Res == nil {
-		ctx.Res = &HTTPResponse{
-			Status:  code,
-			Headers: make(map[string]string),
-		}
-		return
-	}
-	ctx.Res.Status = code
+        if ctx.Res == nil {
+                ctx.Res = &HTTPResponse{
+                        Status:  code,
+                        Headers: make(map[string]string),
+                }
+                return
+        }
+        ctx.Res.Status = code
 }
 
 // SetHeader adds or replaces a single response header.
@@ -111,26 +111,26 @@ func (ctx *Context) Status(code int) {
 // shared maps are never clobbered. Subsequent SetHeader calls on the same
 // response are direct writes into the private copy.
 func (ctx *Context) SetHeader(key, value string) {
-	if ctx.Res == nil {
-		ctx.Res = &HTTPResponse{
-			Status:  200,
-			Headers: make(map[string]string, 4),
-		}
-	}
-	// Copy-on-write: upgrade shared map to a private one.
-	if ctx.Res.headersShared {
-		orig := ctx.Res.Headers
-		priv := make(map[string]string, len(orig)+4)
-		for k, v := range orig {
-			priv[k] = v
-		}
-		ctx.Res.Headers = priv
-		ctx.Res.headersShared = false
-	}
-	if ctx.Res.Headers == nil {
-		ctx.Res.Headers = make(map[string]string, 4)
-	}
-	ctx.Res.Headers[key] = value
+        if ctx.Res == nil {
+                ctx.Res = &HTTPResponse{
+                        Status:  200,
+                        Headers: make(map[string]string, 4),
+                }
+        }
+        // Copy-on-write: upgrade shared map to a private one.
+        if ctx.Res.headersShared {
+                orig := ctx.Res.Headers
+                priv := make(map[string]string, len(orig)+4)
+                for k, v := range orig {
+                        priv[k] = v
+                }
+                ctx.Res.Headers = priv
+                ctx.Res.headersShared = false
+        }
+        if ctx.Res.Headers == nil {
+                ctx.Res.Headers = make(map[string]string, 4)
+        }
+        ctx.Res.Headers[key] = value
 }
 
 // --- Typed store (Set/Get) ---
@@ -142,101 +142,128 @@ func (ctx *Context) SetHeader(key, value string) {
 //
 // Usage:
 //
-//	// In middleware:
-//	ctx.Set("user", claims)
+//      // In middleware:
+//      ctx.Set("user", claims)
 //
-//	// In handler:
-//	claims, ok := ctx.Get("user").(jwt.MapClaims)
+//      // In handler:
+//      claims, ok := ctx.Get("user").(jwt.MapClaims)
 
 // Set stores a typed value under key. The store is allocated on first call.
 func (ctx *Context) Set(key string, val any) {
-	if ctx.store == nil {
-		ctx.store = make(map[string]any, 4)
-	}
-	ctx.store[key] = val
+        if ctx.store == nil {
+                ctx.store = make(map[string]any, 4)
+        }
+        ctx.store[key] = val
 }
 
 // Get retrieves a typed value. Returns (nil, false) if key is absent.
 func (ctx *Context) Get(key string) (any, bool) {
-	if ctx.store == nil {
-		return nil, false
-	}
-	v, ok := ctx.store[key]
-	return v, ok
+        if ctx.store == nil {
+                return nil, false
+        }
+        v, ok := ctx.store[key]
+        return v, ok
 }
 
 // MustGet retrieves a typed value, panicking if key is absent.
 // Use only when you are certain the key was set (e.g. after JWT middleware).
 func (ctx *Context) MustGet(key string) any {
-	v, ok := ctx.Get(key)
-	if !ok {
-		panic("breeze: context key not found: " + key)
-	}
-	return v
+        v, ok := ctx.Get(key)
+        if !ok {
+                panic("breeze: context key not found: " + key)
+        }
+        return v
 }
 
 // --- Params helpers ---
 
 func (ctx *Context) Param(key string) string {
-	if ctx.params == nil {
-		return ""
-	}
-	return ctx.params[key]
+        if ctx.params == nil {
+                return ""
+        }
+        return ctx.params[key]
 }
 
 func (ctx *Context) GetParam(key string) string {
-	if ctx.params == nil {
-		return ""
-	}
-	return ctx.params[key]
+        if ctx.params == nil {
+                return ""
+        }
+        return ctx.params[key]
 }
 
 func (ctx *Context) SetParam(key, value string) {
-	if ctx.params == nil {
-		ctx.params = make(map[string]string)
-	}
-	ctx.params[key] = value
+        if ctx.params == nil {
+                ctx.params = make(map[string]string)
+        }
+        ctx.params[key] = value
 }
 
 func (ctx *Context) SetParams(p map[string]string) {
-	if p == nil {
-		ctx.params = make(map[string]string)
-	} else {
-		ctx.params = p
-	}
+        if p == nil {
+                ctx.params = make(map[string]string)
+        } else {
+                ctx.params = p
+        }
 }
 
 func (ctx *Context) GetParams() map[string]string {
-	if ctx.params == nil {
-		return map[string]string{}
-	}
-	cpy := make(map[string]string, len(ctx.params))
-	for k, v := range ctx.params {
-		cpy[k] = v
-	}
-	return cpy
+        if ctx.params == nil {
+                return map[string]string{}
+        }
+        cpy := make(map[string]string, len(ctx.params))
+        for k, v := range ctx.params {
+                cpy[k] = v
+        }
+        return cpy
 }
 
 func (ctx *Context) Query(key string) string {
-	if ctx.Req == nil || ctx.Req.Query == nil {
-		return ""
-	}
-	return ctx.Req.Query.Get(key)
+        if ctx.Req == nil || ctx.Req.Query == nil {
+                return ""
+        }
+        return ctx.Req.Query.Get(key)
 }
 
 // --- Middleware chain control ---
 
+// NewContext creates a new Context for testing purposes. The Conn field
+// is set to nil — production code should create Contexts via the
+// Breeze event loop, not this constructor.
+//
+// This is intended for middleware unit tests that need to construct a
+// Context without running the full gnet event loop.
+func NewContext(method Method, path string) *Context {
+        return &Context{
+                Req: &HTTPRequest{
+                        Method: method,
+                        Path:   path,
+                        Header: make(map[string]string),
+                },
+                index: -1,
+        }
+}
+
+// SetMiddlewareChain sets the middleware chain and resets the index.
+// This is intended for testing and advanced use cases where you need
+// to construct a Context manually (e.g. for middleware unit tests).
+//
+// The chain is: middlewares... + handler (executed last).
+func (ctx *Context) SetMiddlewareChain(middlewares []HandlerFunc, handler HandlerFunc) {
+        ctx.middlewares = append(middlewares, handler)
+        ctx.index = -1
+}
+
 func (ctx *Context) Next() {
-	ctx.index++
-	if ctx.index >= len(ctx.middlewares) {
-		return
-	}
-	fn := ctx.middlewares[ctx.index]
-	if fn != nil {
-		fn(ctx)
-	}
+        ctx.index++
+        if ctx.index >= len(ctx.middlewares) {
+                return
+        }
+        fn := ctx.middlewares[ctx.index]
+        if fn != nil {
+                fn(ctx)
+        }
 }
 
 func (ctx *Context) Abort() {
-	ctx.index = len(ctx.middlewares)
+        ctx.index = len(ctx.middlewares)
 }

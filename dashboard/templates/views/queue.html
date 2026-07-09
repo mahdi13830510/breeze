@@ -1,0 +1,15 @@
+{{define "content"}}
+<div class="cards" id="queue-cards"></div>
+<div class="table-wrap">
+  <div class="table-head"><h3>Jobs (<span id="job-count">0</span>)</h3></div>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>ID</th><th>Queue</th><th>State</th><th>Attempts</th><th>Queued</th><th>Duration</th><th>Error</th><th>Action</th></tr></thead>
+      <tbody id="job-tbody"></tbody>
+    </table>
+  </div>
+</div>
+<script data-spa-run="always">
+BreezeDash.initPage('queue');
+</script>
+{{end}}

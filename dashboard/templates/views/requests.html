@@ -1,0 +1,24 @@
+{{define "content"}}
+<div class="table-wrap">
+  <div class="table-head">
+    <h3>Live Requests (<span id="req-count">0</span>)</h3>
+    <div class="filters">
+      <select id="f-method"><option value="">All Methods</option><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>OPTIONS</option></select>
+      <select id="f-status"><option value="">All Status</option><option>2xx</option><option>3xx</option><option>4xx</option><option>5xx</option></select>
+      <input id="f-route" placeholder="Route filter">
+      <input id="f-user" placeholder="User filter">
+    </div>
+  </div>
+  <div class="table-scroll" style="max-height:560px;overflow:auto">
+    <table>
+      <thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Status</th><th>Duration</th><th>IP</th><th>User</th><th>Size</th><th>Timeline</th></tr></thead>
+      <tbody id="req-tbody"></tbody>
+    </table>
+  </div>
+</div>
+<script>window.__breezeDashPage='requests';</script>
+<script data-spa-run="always">
+if(window.BreezeDash) BreezeDash.initPage('requests');
+BreezeDash.initPage('requests');
+</script>
+{{end}}

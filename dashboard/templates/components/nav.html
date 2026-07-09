@@ -1,0 +1,49 @@
+{{define "nav"}}
+<nav class="nav" id="dashboard-nav">
+  <div class="nav-section">Monitor</div>
+  <a class="nav-item{{if eq .Data.Page "overview"}} active{{end}}" href="{{.Data.BasePath}}/overview" data-nav="overview">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M 3 12 L 12 3 L 21 12 M 5 10 L 5 20 L 19 20 L 19 10"/></svg>
+    <span>Overview</span>
+  </a>
+  <a class="nav-item{{if eq .Data.Page "requests"}} active{{end}}" href="{{.Data.BasePath}}/requests" data-nav="requests">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M 4 4 L 4 16 L 8 16 L 8 20 L 12 16 L 20 16 L 20 4 Z"/></svg>
+    <span>Live Requests</span>
+  </a>
+  <a class="nav-item{{if eq .Data.Page "timeline"}} active{{end}}" href="{{.Data.BasePath}}/timeline" data-nav="timeline">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M 4 4 L 4 20 M 8 6 L 16 6 M 8 10 L 14 10 M 8 14 L 18 14 M 8 18 L 12 18"/></svg>
+    <span>Timeline</span>
+  </a>
+  <a class="nav-item{{if eq .Data.Page "performance"}} active{{end}}" href="{{.Data.BasePath}}/performance" data-nav="performance">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M 3 17 L 9 11 L 13 15 L 21 7 M 14 7 L 21 7 L 21 14"/></svg>
+    <span>Performance</span>
+  </a>
+
+  <div class="nav-section">Develop</div>
+  <a class="nav-item{{if eq .Data.Page "routes"}} active{{end}}" href="{{.Data.BasePath}}/routes" data-nav="routes">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M 4 6 L 20 6 M 4 12 L 20 12 M 4 18 L 14 18"/></svg>
+    <span>Routes</span>
+  </a>
+  <a class="nav-item{{if eq .Data.Page "api"}} active{{end}}" href="{{.Data.BasePath}}/api" data-nav="api">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M 4 4 L 4 20 L 20 20 L 20 4 Z M 8 8 L 16 8 M 8 12 L 16 12 M 8 16 L 13 16"/></svg>
+    <span>API Explorer</span>
+  </a>
+
+  <div class="nav-section">System</div>
+  <a class="nav-item{{if eq .Data.Page "cache"}} active{{end}}" href="{{.Data.BasePath}}/cache" data-nav="cache">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M 4 7 L 12 3 L 20 7 L 20 17 L 12 21 L 4 17 Z"/></svg>
+    <span>Cache</span>
+  </a>
+  <a class="nav-item{{if eq .Data.Page "logs"}} active{{end}}" href="{{.Data.BasePath}}/logs" data-nav="logs">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M 4 4 L 4 20 L 20 20 M 8 8 L 16 8 M 8 12 L 16 12 M 8 16 L 13 16"/></svg>
+    <span>Logs</span>
+  </a>
+  <a class="nav-item{{if eq .Data.Page "health"}} active{{end}}" href="{{.Data.BasePath}}/health" data-nav="health">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M 12 21 C 7 21 3 17 3 12 C 3 7 7 3 12 3 C 17 3 21 7 21 12 C 21 17 17 21 12 21 Z M 9 12 L 11 14 L 15 10"/></svg>
+    <span>Health</span>
+  </a>
+  <a class="nav-item{{if eq .Data.Page "architecture"}} active{{end}}" href="{{.Data.BasePath}}/architecture" data-nav="architecture">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M 12 2 L 2 7 L 12 12 L 22 7 Z M 2 17 L 12 22 L 22 17 M 2 12 L 12 17 L 22 12"/></svg>
+    <span>Architecture</span>
+  </a>
+</nav>
+{{end}}

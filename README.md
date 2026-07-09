@@ -81,6 +81,25 @@ go get github.com/nelthaarion/breeze
 -   📝 Request Logger
 -   💥 Panic Recovery
 
+### 📊 Built-in Developer Dashboard
+
+-   🔧 Native module under `/dashboard` (zero-overhead when disabled)
+-   📈 Real-time overview: RPS, latency, memory, goroutines, CPU
+-   🛣 Routes Explorer with per-route latency stats
+-   🧪 API Explorer with multi-language code generation (curl/Go/JS/Python/C#/PHP)
+-   📡 Live Requests feed with WebSocket push
+-   🗄 Database Browser (read-only, paginated)
+-   🔍 ORM Query Monitor with slow-query detection
+-   💾 Cache, Queue, and Scheduler monitors
+-   📝 Logs with five tabs (App / HTTP / Errors / Panics / Warnings)
+-   ❤️ Health checks with green/yellow/red indicators
+-   ⚡ Go runtime performance metrics with charts
+-   🕒 Developer Timeline — per-request profiler with expandable steps
+-   🔒 HTTP Basic Auth + secret masking (Authorization, Cookie, API keys...)
+-   🌑 Modern dark mode, responsive, single-file SPA (no external deps)
+
+See [`dashboard/README.md`](./dashboard/README.md) for full documentation.
+
 ### ⚙️ Developer Experience
 
 -   📦 Lightweight architecture

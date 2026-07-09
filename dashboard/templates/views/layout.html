@@ -1,0 +1,41 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>Breeze Dashboard</title>
+  <link rel="stylesheet" href="{{.Data.AssetsPath}}/dashboard.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">B</div>
+        <div>
+          <h1>Breeze</h1>
+          <div class="sub">Developer Dashboard</div>
+        </div>
+      </div>
+      {{component "nav" .}}
+      <div class="sidebar-footer">
+        <span><span class="ws-dot off" id="ws-dot"></span><span class="ws-status" id="ws-status">connecting...</span></span>
+        <a href="{{.Data.BasePath}}/logout" class="logout-link" title="Sign out">&#x23FB;</a>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <h2 id="page-title">{{.Data.PageTitle}}</h2>
+        <div class="right">
+          <span id="server-time"></span>
+        </div>
+      </header>
+      <div class="content" id="breeze-app">
+        {{template "content" .}}
+      </div>
+    </main>
+  </div>
+  <script src="{{.Data.AssetsPath}}/dashboard.js"></script>
+</body>
+</html>
+{{end}}

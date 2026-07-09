@@ -1,0 +1,16 @@
+{{define "content"}}
+<div class="log-tabs" id="log-tabs">
+  <div class="log-tab active" data-tab="app">Application<span class="count" id="log-count-app">0</span></div>
+  <div class="log-tab" data-tab="http">HTTP<span class="count" id="log-count-http">0</span></div>
+  <div class="log-tab" data-tab="error">Errors<span class="count" id="log-count-error">0</span></div>
+  <div class="log-tab" data-tab="panic">Panics<span class="count" id="log-count-panic">0</span></div>
+  <div class="log-tab" data-tab="warning">Warnings<span class="count" id="log-count-warning">0</span></div>
+</div>
+<div style="margin-bottom:12px"><input id="log-search" placeholder="Search logs..." style="max-width:400px"></div>
+<div class="log-viewer" id="log-viewer"></div>
+<script>window.__breezeDashPage='logs';</script>
+<script data-spa-run="always">
+if(window.BreezeDash) BreezeDash.initPage('logs');
+BreezeDash.initPage('logs');
+</script>
+{{end}}

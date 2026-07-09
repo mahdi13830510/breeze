@@ -1,0 +1,19 @@
+{{define "content"}}
+<div class="table-wrap">
+  <div class="table-head">
+    <h3>Routes (<span id="route-count">0</span>)</h3>
+    <div class="filters"><input id="route-search" placeholder="Search..."></div>
+  </div>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Method</th><th>Path</th><th>Requests</th><th>Avg Latency</th><th>Max</th><th>Last</th><th>Errors</th></tr></thead>
+      <tbody id="routes-tbody"></tbody>
+    </table>
+  </div>
+</div>
+<script>window.__breezeDashPage='routes';</script>
+<script data-spa-run="always">
+if(window.BreezeDash) BreezeDash.initPage('routes');
+BreezeDash.initPage('routes');
+</script>
+{{end}}

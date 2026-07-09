@@ -1,0 +1,14 @@
+{{define "content"}}
+<div class="table-wrap">
+  <div class="table-head"><h3>Scheduled Tasks (<span id="task-count">0</span>)</h3></div>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Name</th><th>Cron</th><th>Last Run</th><th>Duration</th><th>Next Run</th><th>Status</th><th>Runs</th><th>Failures</th></tr></thead>
+      <tbody id="task-tbody"></tbody>
+    </table>
+  </div>
+</div>
+<script data-spa-run="always">
+BreezeDash.initPage('scheduler');
+</script>
+{{end}}

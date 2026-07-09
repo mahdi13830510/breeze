@@ -1,0 +1,11 @@
+{{define "content"}}
+<div class="db-grid">
+  <div class="db-tables" id="db-tables"></div>
+  <div class="db-data" id="db-data">
+    <div class="empty" style="padding:40px"><div class="icon">&#x25a3;</div>Select a table to browse</div>
+  </div>
+</div>
+<script data-spa-run="always">
+BreezeDash.initPage('database');
+</script>
+{{end}}

@@ -1,0 +1,13 @@
+{{define "content"}}
+<div class="api-grid">
+  <div class="api-list" id="api-list"></div>
+  <div class="api-detail" id="api-detail">
+    <div class="empty"><div class="icon">&#x2197;</div>Select an endpoint to begin</div>
+  </div>
+</div>
+<script>window.__breezeDashPage='api';</script>
+<script data-spa-run="always">
+if(window.BreezeDash) BreezeDash.initPage('api');
+BreezeDash.initPage('api');
+</script>
+{{end}}

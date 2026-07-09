@@ -1,20 +1,21 @@
 package breeze
 
 import (
-	"fmt"
-	"sync"
+        "fmt"
+        "runtime/debug"
+        "sync"
 
-	"github.com/panjf2000/gnet/v2"
+        "github.com/panjf2000/gnet/v2"
 )
 
 type Breeze struct {
-	*gnet.BuiltinEventEngine
-	Router *Router
-	bufs   sync.Map // fd(int) → []byte ; per-connection HTTP reassembly buffer
-	Pool   *WorkerPool
+        *gnet.BuiltinEventEngine
+        Router *Router
+        bufs   sync.Map // fd(int) → []byte ; per-connection HTTP reassembly buffer
+        Pool   *WorkerPool
 
-	// WebSocket support — initialised lazily by WebSocket().
-	wsHubFields
+        // WebSocket support — initialised lazily by WebSocket().
+        wsHubFields
 }
 
 // compactThreshold: compact the leftover slice when the unused capacity
@@ -22,11 +23,11 @@ type Breeze struct {
 const compactThreshold = 512
 
 func New(router *Router, pool *WorkerPool) *Breeze {
-	return &Breeze{
-		BuiltinEventEngine: &gnet.BuiltinEventEngine{},
-		Router:             router,
-		Pool:               pool,
-	}
+        return &Breeze{
+                BuiltinEventEngine: &gnet.BuiltinEventEngine{},
+                Router:             router,
+                Pool:               pool,
+        }
 }
 
 // OnTraffic is called by gnet for every incoming data event.
@@ -40,114 +41,131 @@ func New(router *Router, pool *WorkerPool) *Breeze {
 // This means WebSocket connections have no HTTP overhead after the upgrade,
 // and HTTP connections have no WebSocket overhead (a single sync.Map miss).
 func (s *Breeze) OnTraffic(c gnet.Conn) gnet.Action {
-	fd := c.Fd()
+        fd := c.Fd()
 
-	// ── WebSocket fast path ──────────────────────────────────────────────
-	if state, ok := s.isWSConn(fd); ok {
-		return s.handleWSTraffic(c, state)
-	}
+        // ── WebSocket fast path ──────────────────────────────────────────────
+        if state, ok := s.isWSConn(fd); ok {
+                return s.handleWSTraffic(c, state)
+        }
 
-	// ── HTTP path ────────────────────────────────────────────────────────
-	data, _ := c.Next(-1)
-	if len(data) == 0 {
-		return gnet.None
-	}
+        // ── HTTP path ────────────────────────────────────────────────────────
+        data, _ := c.Next(-1)
+        if len(data) == 0 {
+                return gnet.None
+        }
 
-	// Always copy incoming data into a Go-owned buffer.
-	//
-	// gnet's data slice is a view into gnet's internal ring buffer.
-	// gnet is free to overwrite that memory as soon as OnTraffic returns,
-	// but req.Body may still reference it from a worker goroutine.
-	// By appending into an existing Go slice (or a fresh one when existing
-	// is nil), we ensure buf is always GC-managed: req.Body = buf[x:y]
-	// keeps the backing array alive for exactly as long as the request lives.
-	var existing []byte
-	if v, ok := s.bufs.Load(fd); ok {
-		existing = v.([]byte)
-	}
-	buf := append(existing, data...)
+        // Always copy incoming data into a Go-owned buffer.
+        //
+        // gnet's data slice is a view into gnet's internal ring buffer.
+        // gnet is free to overwrite that memory as soon as OnTraffic returns,
+        // but req.Body may still reference it from a worker goroutine.
+        // By appending into an existing Go slice (or a fresh one when existing
+        // is nil), we ensure buf is always GC-managed: req.Body = buf[x:y]
+        // keeps the backing array alive for exactly as long as the request lives.
+        var existing []byte
+        if v, ok := s.bufs.Load(fd); ok {
+                existing = v.([]byte)
+        }
+        buf := append(existing, data...)
 
-	for len(buf) > 0 {
-		req, consumed, err := ParseHTTPRequest(buf)
-		if err != nil {
-			c.AsyncWrite([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\n\r\nBad Request"), nil)
-			buf = nil
-			break
-		}
-		if req == nil {
-			break // incomplete — wait for more data
-		}
+        for len(buf) > 0 {
+                req, consumed, err := ParseHTTPRequest(buf)
+                if err != nil {
+                        c.AsyncWrite([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\n\r\nBad Request"), nil)
+                        buf = nil
+                        break
+                }
+                if req == nil {
+                        break // incomplete — wait for more data
+                }
 
-		handler, middlewares, params := s.Router.Find(req)
+                handler, middlewares, params := s.Router.Find(req)
 
-		if handler == nil {
-			c.AsyncWrite([]byte("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found"), nil)
-		} else {
-			ctx := &Context{
-				Conn:        c,
-				Req:         req,
-				params:      params,
-				middlewares: append(middlewares, handler),
-				index:       -1,
-			}
+                if handler == nil {
+                        c.AsyncWrite([]byte("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found"), nil)
+                } else {
+                        ctx := &Context{
+                                Conn:        c,
+                                Req:         req,
+                                params:      params,
+                                middlewares: append(middlewares, handler),
+                                index:       -1,
+                        }
 
-			exec := func() {
-				ctx.Next()
-				if ctx.Res != nil {
-					c.AsyncWrite(ctx.Res.Bytes(), nil)
-				}
-			}
+                        exec := func() {
+                                // Recover from panics in handlers so a buggy handler
+                                // does not crash the worker goroutine. A crashed worker
+                                // would leak the WaitGroup counter (the defer Done() would
+                                // never run) and eventually deadlock the pool on Shutdown.
+                                defer func() {
+                                        if r := recover(); r != nil {
+                                                fmt.Printf("[Breeze][PANIC] %v\n%s\n", r, debug.Stack())
+                                                if ctx.Res == nil {
+                                                        ctx.Res = &HTTPResponse{
+                                                                Status: 500,
+                                                                Headers: map[string]string{"Content-Type": "text/plain"},
+                                                                Body: []byte("Internal Server Error"),
+                                                        }
+                                                }
+                                                c.AsyncWrite(ctx.Res.Bytes(), nil)
+                                        }
+                                }()
+                                ctx.Next()
+                                if ctx.Res != nil {
+                                        c.AsyncWrite(ctx.Res.Bytes(), nil)
+                                }
+                        }
 
-			if s.Pool != nil {
-				s.Pool.Submit(exec)
-			} else {
-				go exec()
-			}
-		}
+                        if s.Pool != nil {
+                                s.Pool.Submit(exec)
+                        } else {
+                                go exec()
+                        }
+                }
 
-		if consumed >= len(buf) {
-			buf = nil
-			break
-		}
-		buf = buf[consumed:]
-	}
+                if consumed >= len(buf) {
+                        buf = nil
+                        break
+                }
+                buf = buf[consumed:]
+        }
 
-	// Store leftover bytes (partial next request).
-	if len(buf) == 0 {
-		s.bufs.Delete(fd)
-	} else {
-		if cap(buf)-len(buf) > compactThreshold {
-			compact := make([]byte, len(buf))
-			copy(compact, buf)
-			buf = compact
-		}
-		s.bufs.Store(fd, buf)
-	}
+        // Store leftover bytes (partial next request).
+        if len(buf) == 0 {
+                s.bufs.Delete(fd)
+        } else {
+                if cap(buf)-len(buf) > compactThreshold {
+                        compact := make([]byte, len(buf))
+                        copy(compact, buf)
+                        buf = compact
+                }
+                s.bufs.Store(fd, buf)
+        }
 
-	return gnet.None
+        return gnet.None
 }
 
 // OnClose cleans up all per-connection state when a connection closes.
 // For WebSocket connections that closed unexpectedly (no Close frame received),
 // we still call OnClose so the application can clean up its own state.
 func (s *Breeze) OnClose(c gnet.Conn, err error) gnet.Action {
-	fd := c.Fd()
-	s.bufs.Delete(fd)
+        fd := c.Fd()
+        s.bufs.Delete(fd)
 
-	// WebSocket cleanup on unexpected close (e.g. TCP RST, network drop).
-	if state, ok := s.isWSConn(fd); ok {
-		s.cleanupWS(fd, state.wc, state.handler, 1006, "abnormal closure")
-	}
+        // WebSocket cleanup on unexpected close (e.g. TCP RST, network drop).
+        if state, ok := s.isWSConn(fd); ok {
+                s.cleanupWS(fd, state.wc, state.handler, 1006, "abnormal closure")
+        }
 
-	return gnet.None
+        return gnet.None
 }
 
 func (s *Breeze) Run(port int, multiCore bool) error {
-	return gnet.Run(
-		s,
-		fmt.Sprintf("tcp://:%d", port),
-		gnet.WithTCPNoDelay(gnet.TCPNoDelay),
-		gnet.WithMulticore(multiCore),
-		gnet.WithLoadBalancing(gnet.RoundRobin),
-	)
+        return gnet.Run(
+                s,
+                fmt.Sprintf("tcp://:%d", port),
+                gnet.WithTCPNoDelay(gnet.TCPNoDelay),
+                gnet.WithMulticore(multiCore),
+                gnet.WithLoadBalancing(gnet.RoundRobin),
+        )
 }

@@ -1,0 +1,42 @@
+{{define "content"}}
+<div class="cards" id="perf-cards"></div>
+<div class="chart-row">
+  <div class="chart-card">
+    <div class="head"><h3>Heap Allocation (MB) — HeapAlloc</h3></div>
+    <canvas id="chart-perf-heap" style="width:100%;height:200px;display:block"></canvas>
+    <div style="font-size:10px;color:var(--text-muted);margin-top:4px">Live heap bytes. Drops after GC. Never mixed with TotalAlloc or HeapSys.</div>
+  </div>
+  <div class="chart-card">
+    <div class="head"><h3>Memory from OS (MB) — Sys</h3></div>
+    <canvas id="chart-perf-mem-sys" style="width:100%;height:200px;display:block"></canvas>
+    <div style="font-size:10px;color:var(--text-muted);margin-top:4px">Total bytes obtained from OS (MemStats.Sys). Shrinks as Go returns memory (HeapReleased).</div>
+  </div>
+</div>
+<div class="chart-row">
+  <div class="chart-card">
+    <div class="head"><h3>GC Count — NumGC</h3></div>
+    <canvas id="chart-perf-gc" style="width:100%;height:200px;display:block"></canvas>
+    <div style="font-size:10px;color:var(--text-muted);margin-top:4px">Each step up = one GC event. Flat line means no GC is running.</div>
+  </div>
+  <div class="chart-card">
+    <div class="head"><h3>GC Pause (ms) — last pause</h3></div>
+    <canvas id="chart-perf-pause" style="width:100%;height:200px;display:block"></canvas>
+    <div style="font-size:10px;color:var(--text-muted);margin-top:4px">Duration of the most recent GC stop-the-world pause.</div>
+  </div>
+</div>
+<div class="chart-row">
+  <div class="chart-card">
+    <div class="head"><h3>Goroutines</h3></div>
+    <canvas id="chart-perf-goro" style="width:100%;height:200px;display:block"></canvas>
+  </div>
+  <div class="chart-card">
+    <div class="head"><h3>CPU Usage (%)</h3></div>
+    <canvas id="chart-perf-cpu" style="width:100%;height:200px;display:block"></canvas>
+  </div>
+</div>
+<script>window.__breezeDashPage='performance';</script>
+<script data-spa-run="always">
+if(window.BreezeDash) BreezeDash.initPage('performance');
+BreezeDash.initPage('performance');
+</script>
+{{end}}

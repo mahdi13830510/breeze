@@ -4,6 +4,82 @@ All changes made to the Breeze framework.
 
 ---
 
+## New Features
+
+### Developer Dashboard (`/dashboard`)
+
+A production-grade, native developer dashboard inspired by Laravel Telescope,
+Horizon, and Grafana. Designed specifically for Breeze.
+
+**Pages (13 total):**
+
+- Overview — real-time cards (RPS, latency, error rate, goroutines, heap,
+  CPU, cache hit ratio, queue jobs) + 4 live charts
+- Routes Explorer — every registered route with per-route latency stats
+- API Explorer — native API client (no Swagger redirect) with one-click
+  code generation in curl / Go / JavaScript / Python / C# / PHP
+- Live Requests — every incoming request with method/status/route/user
+  filters, slow-request highlighting
+- Database Browser — paginated table browser with column metadata and
+  foreign-key relationships (read-only)
+- ORM Query Monitor — every SQL with args, duration, rows, file:line,
+  slow-query highlighting, expandable rows
+- Cache Monitor — driver, keys, hits/misses, hit rate, clear/cache-prefix
+- Queue Monitor — pending/running/completed/failed with retry button
+- Scheduler — task name, cron, last/next run, status, run/fail counts
+- Logs — five tabs (App / HTTP / Errors / Panics / Warnings) with search
+- Health — configurable probes with green/yellow/red indicators
+- Performance — Go runtime metrics (goroutines, GC, heap, stack, CPU,
+  network) with 4 live charts
+- Developer Timeline — per-request hierarchical profiler with
+  expandable steps and metadata (the headline feature)
+
+**Architecture:**
+
+- Single WebSocket connection multiplexes all live updates (no polling)
+- 1Hz metrics sampler pushes runtime stats into a 10-minute ring buffer
+- Self-contained SPA: HTML + CSS + JS inlined into a single response
+  (zero external dependencies, zero asset pipeline)
+- Custom canvas charts (no Chart.js / D3 / npm)
+- HTTP Basic Auth with constant-time password comparison (SHA-256 +
+  subtle.ConstantTimeCompare)
+- Secret masking for Authorization, Cookie, API-Key, Token, Password headers
+  and key=value patterns in log lines
+- Zero-overhead fast path: when enabled: false, the middleware returns
+  immediately after ctx.Next() — no allocations, no locks
+- Ring buffers bound memory for every collector (requests, queries, logs,
+  timelines, metrics)
+
+**Configuration:**
+
+```yaml
+dashboard:
+  enabled: true
+  timeline: true
+  queries: true
+  metrics: true
+  requests: true
+  base_path: "/dashboard"
+  username: "admin"
+  password: "s3cret"
+  max_requests: 1000
+  max_queries: 500
+  max_logs: 1000
+  slow_query_ms: 100
+  slow_request_ms: 500
+```
+
+**Installation:**
+
+```go
+coll := dashboard.Install(app, router, dashboard.DefaultConfig())
+router.Use(coll.Middleware())
+```
+
+See `dashboard/README.md` for full documentation.
+
+---
+
 ## Bug Fixes
 
 ### 1. `types.go` — HTTP Method Typo

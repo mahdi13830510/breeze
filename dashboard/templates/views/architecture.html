@@ -1,0 +1,21 @@
+{{define "content"}}
+<div class="arch-summary" id="arch-summary"></div>
+<div class="arch-toolbar">
+  <button id="arch-zoom-in" title="Zoom in">+</button>
+  <button id="arch-zoom-out" title="Zoom out">&minus;</button>
+  <button id="arch-zoom-reset" title="Reset view">&#x21bb;</button>
+  <span class="arch-zoom-label" id="arch-zoom-label">100%</span>
+</div>
+<div class="arch-canvas-wrap" id="arch-canvas-wrap">
+  <div class="arch-viewport" id="arch-viewport">
+    <svg class="arch-svg" id="arch-svg" viewBox="0 0 900 700" preserveAspectRatio="xMidYMid meet"></svg>
+    <div class="arch-overlay" id="arch-overlay"></div>
+  </div>
+</div>
+<div class="arch-cards" id="arch-cards"></div>
+<script>window.__breezeDashPage='architecture';</script>
+<script data-spa-run="always">
+if(window.BreezeDash) BreezeDash.initPage('architecture');
+BreezeDash.initPage('architecture');
+</script>
+{{end}}
