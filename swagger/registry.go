@@ -3,6 +3,7 @@ package swagger
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // routeEntry is the internal record stored per registered route.
@@ -13,19 +14,25 @@ type routeEntry struct {
 }
 
 var (
-	mu       sync.RWMutex
-	routes   []routeEntry
-	enabled  bool
+	mu         sync.RWMutex
+	routes     []routeEntry
+	enabled    atomic.Bool
 	apiTitle   string
 	apiVersion string
 	apiDesc    string
 )
 
-// Enable activates swagger doc collection.
-func Enable() { enabled = true }
+// Enable activates API documentation collection.
+func Enable() {
+	enabled.Store(true)
+}
+
+// Enabled returns whether Scalar is currently active.
+func Enabled() bool {
+	return enabled.Load()
+}
 
 // Enabled returns whether swagger is currently active.
-func Enabled() bool { return enabled }
 
 // SetInfo sets the API title, version, and optional description shown in the UI.
 func SetInfo(title, version, description string) {
@@ -73,5 +80,3 @@ func breezePath(pattern string) string {
 	}
 	return strings.Join(parts, "/")
 }
-
-
