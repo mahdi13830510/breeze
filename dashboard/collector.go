@@ -76,6 +76,10 @@ type Collector struct {
         // Architecture visualization page.
         connStore *connectionStore
 
+        // Optional database inspector for the Database Browser page.
+        dbInspectorMu sync.RWMutex
+        dbInspector   DBInspector
+
         // Persistence: storage backend + state tracking.
         storage     Storage
         uniqueIPsMu sync.RWMutex
