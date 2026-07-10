@@ -161,15 +161,20 @@ func GenerateUI(jsonPath string) []byte {
       background: #0b1020;
     }
 
-    scalar-api-reference {
+		#app {
       display: block;
       min-height: 100vh;
     }
   </style>
 </head>
 <body>
-<scalar-api-reference id="scalar-reference" url="` + jsonPath + `"></scalar-api-reference>
+<div id="app"></div>
 <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+<script>
+	Scalar.createApiReference('#app', {
+		url: '` + jsonPath + `',
+	})
+</script>
 </body>
 </html>`
 
