@@ -456,6 +456,7 @@ func (c *Collector) handleDBTableData(ctx *breeze.Context) {
                 ctx.JSON(map[string]any{"error": err.Error()})
                 return
         }
+        data.Writable = c.cfg.AllowWrites && c.DBWriter() != nil
         ctx.JSON(data)
 }
 

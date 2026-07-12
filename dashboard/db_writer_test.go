@@ -1,6 +1,11 @@
 package dashboard
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/nelthaarion/breeze"
+)
 
 // mockWriter is a minimal DBWriter used across db_writer_test.go.
 type mockWriter struct {
@@ -54,5 +59,44 @@ func TestConfigAllowWritesDefaultsFalse(t *testing.T) {
 	cfg2 := DefaultConfig()
 	if cfg2.AllowWrites {
 		t.Error("DefaultConfig().AllowWrites should be false")
+	}
+}
+
+// TestHandleDBTableData_WritableFlag verifies the "writable" JSON field
+// reflects both the AllowWrites config and whether a DBWriter is set.
+func TestHandleDBTableData_WritableFlag(t *testing.T) {
+	cases := []struct {
+		name        string
+		allowWrites bool
+		setWriter   bool
+		want        bool
+	}{
+		{"disabled by default", false, false, false},
+		{"writer set but AllowWrites false", false, true, false},
+		{"AllowWrites true but no writer", true, false, false},
+		{"both set", true, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.AllowWrites = tc.allowWrites
+			c := newCollector(cfg, nil)
+			c.SetDBInspector(&mockInspector{})
+			if tc.setWriter {
+				c.SetDBWriter(&mockWriter{})
+			}
+
+			ctx := breeze.NewContext(breeze.GET, "/api/db/tables/users")
+			ctx.SetParam("name", "users")
+			c.handleDBTableData(ctx)
+
+			var data TableData
+			if err := json.Unmarshal(ctx.Res.Body, &data); err != nil {
+				t.Fatalf("unmarshal response: %v", err)
+			}
+			if data.Writable != tc.want {
+				t.Errorf("Writable = %v, want %v", data.Writable, tc.want)
+			}
+		})
 	}
 }
