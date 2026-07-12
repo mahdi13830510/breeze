@@ -1,9 +1,10 @@
 package dashboard
 
 import (
-	"crypto/sha256"
+	"crypto/pbkdf2"
+	"crypto/rand"
+	"crypto/sha512"
 	"crypto/subtle"
-	"encoding/hex"
 	"strings"
 
 	"github.com/nelthaarion/breeze"
@@ -12,11 +13,11 @@ import (
 // AuthMiddleware returns a middleware that enforces dashboard authentication.
 //
 // Auth flow:
-//   1. Check for a valid session cookie. If present and valid, attach the
-//      username to the context and continue.
-//   2. If no valid session, redirect to the login page (HTTP 302).
-//   3. The login page POSTs to /dashboard/login which validates credentials
-//      and sets a session cookie.
+//  1. Check for a valid session cookie. If present and valid, attach the
+//     username to the context and continue.
+//  2. If no valid session, redirect to the login page (HTTP 302).
+//  3. The login page POSTs to /dashboard/login which validates credentials
+//     and sets a session cookie.
 //
 // When DisableAuth is true, OR when both Username and Password are empty,
 // the middleware is a no-op — useful for local development.
@@ -127,10 +128,10 @@ func extractCookieValue(cookieHeader, name string) string {
 // than plaintext so the constant-time comparison always runs on a fixed-size
 // buffer.
 func hashPass(p string) []byte {
-	h := sha256.Sum256([]byte(p))
-	out := make([]byte, hex.EncodedLen(len(h)))
-	hex.Encode(out, h[:])
-	return out
+	salt := make([]byte, 16)
+	rand.Read(salt)
+	key, _ := pbkdf2.Key(sha512.New, p, salt, 4096, 32)
+	return key
 }
 
 // decodeBasic decodes a base64-encoded "user:pass" Basic auth payload.
