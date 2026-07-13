@@ -7,9 +7,15 @@ import (
 	"html/template"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 )
+
+// bodyOpenTag matches the opening <body ...> tag (with or without
+// attributes), case-insensitively, so the SPA runtime can be injected
+// immediately after it regardless of how the layout wrote it.
+var bodyOpenTag = regexp.MustCompile(`(?i)<body[^>]*>`)
 
 // ─── Template Engine ──────────────────────────────────────────────────────────
 //
@@ -47,7 +53,8 @@ type TemplateEngine struct {
 	compDir    string
 	layoutFile string
 	funcMap    template.FuncMap
-	devMode    bool // if true, re-parse on every render (hot reload)
+	devMode    bool  // if true, re-parse on every render (hot reload)
+	i18n       *I18n // optional translation bundle backing the t helper
 }
 
 // TemplateConfig configures the template engine.
@@ -63,6 +70,10 @@ type TemplateConfig struct {
 	FuncMap template.FuncMap
 	// DevMode disables template caching so changes are reflected immediately.
 	DevMode bool
+	// I18n enables the {{t "some.key"}} translation helper, bound per
+	// request to the locale resolved by middleware.LocaleMiddleware.
+	// When nil, t still parses but echoes the key.
+	I18n *I18n
 }
 
 // NewTemplateEngine creates a template engine from the given config.
@@ -85,6 +96,7 @@ func NewTemplateEngine(cfg TemplateConfig) *TemplateEngine {
 		layoutFile: cfg.LayoutFile,
 		devMode:    cfg.DevMode,
 		funcMap:    cfg.FuncMap,
+		i18n:       cfg.I18n,
 	}
 
 	if te.funcMap == nil {
@@ -92,9 +104,10 @@ func NewTemplateEngine(cfg TemplateConfig) *TemplateEngine {
 	}
 
 	// Built-in "component" function — renders a named component with data.
+	// Rebound per locale in funcsForLocale so nested components translate.
 	te.funcMap["component"] = func(name string, data any) (template.HTML, error) {
 		var buf bytes.Buffer
-		if err := te.renderComponent(name, data, &buf); err != nil {
+		if err := te.renderComponent(name, "", data, &buf); err != nil {
 			return "", err
 		}
 		return template.HTML(buf.String()), nil
@@ -102,6 +115,10 @@ func NewTemplateEngine(cfg TemplateConfig) *TemplateEngine {
 
 	// Built-in "partial" alias for component.
 	te.funcMap["partial"] = te.funcMap["component"]
+
+	// Built-in "t" translation helper. This base version covers templates
+	// rendered with no locale; funcsForLocale rebinds it per locale.
+	te.funcMap["t"] = te.tFunc("")
 
 	// Built-in "map" helper: create a map[string]any inline inside a template.
 	// Usage: {{component "card" (map "title" "Hello" "body" "World")}}
@@ -123,11 +140,72 @@ func NewTemplateEngine(cfg TemplateConfig) *TemplateEngine {
 	return te
 }
 
+// ─── i18n plumbing ────────────────────────────────────────────────────────────
+//
+// Go binds template funcs at parse time while the locale is per-request, so
+// template sets are parsed and cached once per (name, locale) pair with t
+// bound to that locale. Locales are a small finite set, so this costs a few
+// extra cached sets and zero per-request cloning.
+
+// tFunc returns a t helper bound to locale. Without a bundle it echoes the
+// key so templates using t still parse and render.
+func (te *TemplateEngine) tFunc(locale string) func(key string, args ...any) string {
+	return func(key string, args ...any) string {
+		if te.i18n == nil {
+			return key
+		}
+		return te.i18n.T(locale, key, args...)
+	}
+}
+
+// funcsForLocale returns the engine funcMap with t and component/partial
+// rebound to the given locale, so translation reaches nested components.
+func (te *TemplateEngine) funcsForLocale(locale string) template.FuncMap {
+	if te.i18n == nil || locale == "" {
+		return te.funcMap
+	}
+	fm := make(template.FuncMap, len(te.funcMap))
+	for k, v := range te.funcMap {
+		fm[k] = v
+	}
+	fm["t"] = te.tFunc(locale)
+	fm["component"] = func(name string, data any) (template.HTML, error) {
+		var buf bytes.Buffer
+		if err := te.renderComponent(name, locale, data, &buf); err != nil {
+			return "", err
+		}
+		return template.HTML(buf.String()), nil
+	}
+	fm["partial"] = fm["component"]
+	return fm
+}
+
+// localeKey builds the cache key for a (template name, locale) pair.
+// \x00 cannot appear in either part, so keys are unambiguous.
+func localeKey(name, locale string) string {
+	if locale == "" {
+		return name
+	}
+	return name + "\x00" + locale
+}
+
+// requestLocale resolves the locale for a render: the one set by the locale
+// middleware, else the bundle default, else "".
+func (te *TemplateEngine) requestLocale(ctx *Context) string {
+	if l := ctx.Locale(); l != "" {
+		return l
+	}
+	if te.i18n != nil {
+		return te.i18n.DefaultLocale()
+	}
+	return ""
+}
+
 // ─── Parsing ──────────────────────────────────────────────────────────────────
 
 // parseView parses a view file together with all component files and the layout
-// (if present) into a single *template.Template set.
-func (te *TemplateEngine) parseView(viewName string) (*template.Template, error) {
+// (if present) into a single *template.Template set, with funcs bound to locale.
+func (te *TemplateEngine) parseView(viewName, locale string) (*template.Template, error) {
 	viewPath := filepath.Join(te.viewsDir, viewName+".html")
 
 	// Collect files: view first, then components, then layout.
@@ -148,14 +226,14 @@ func (te *TemplateEngine) parseView(viewName string) (*template.Template, error)
 		}
 	}
 
-	t := template.New(filepath.Base(viewPath)).Funcs(te.funcMap)
+	t := template.New(filepath.Base(viewPath)).Funcs(te.funcsForLocale(locale))
 	return t.ParseFiles(files...)
 }
 
-// parseComponent parses a single component file.
-func (te *TemplateEngine) parseComponent(name string) (*template.Template, error) {
+// parseComponent parses a single component file with funcs bound to locale.
+func (te *TemplateEngine) parseComponent(name, locale string) (*template.Template, error) {
 	path := filepath.Join(te.compDir, name+".html")
-	t := template.New(filepath.Base(path)).Funcs(te.funcMap)
+	t := template.New(filepath.Base(path)).Funcs(te.funcsForLocale(locale))
 	return t.ParseFiles(path)
 }
 
@@ -167,7 +245,7 @@ func (te *TemplateEngine) parseComponent(name string) (*template.Template, error
 // After ParseFiles, that block lives as a named template inside the set.
 // We must call t.Lookup(name) — t.Execute() runs the anonymous root template
 // (the file wrapper), which is empty and produces no output.
-func (te *TemplateEngine) renderComponent(name string, data any, w *bytes.Buffer) error {
+func (te *TemplateEngine) renderComponent(name, locale string, data any, w *bytes.Buffer) error {
 	exec := func(t *template.Template) error {
 		named := t.Lookup(name)
 		if named == nil {
@@ -177,25 +255,26 @@ func (te *TemplateEngine) renderComponent(name string, data any, w *bytes.Buffer
 	}
 
 	if te.devMode {
-		t, err := te.parseComponent(name)
+		t, err := te.parseComponent(name, locale)
 		if err != nil {
 			return fmt.Errorf("breeze/template: component %q: %w", name, err)
 		}
 		return exec(t)
 	}
 
+	key := localeKey(name, locale)
 	te.mu.RLock()
-	t, ok := te.components[name]
+	t, ok := te.components[key]
 	te.mu.RUnlock()
 
 	if !ok {
 		var err error
-		t, err = te.parseComponent(name)
+		t, err = te.parseComponent(name, locale)
 		if err != nil {
 			return fmt.Errorf("breeze/template: component %q: %w", name, err)
 		}
 		te.mu.Lock()
-		te.components[name] = t
+		te.components[key] = t
 		te.mu.Unlock()
 	}
 	return exec(t)
@@ -210,47 +289,52 @@ func (te *TemplateEngine) renderComponent(name string, data any, w *bytes.Buffer
 //     full page reload.
 func (te *TemplateEngine) RenderView(ctx *Context, viewName string, data any) {
 	isPartial := ctx.Req.Header["x-breeze-partial"] == "true"
+	locale := te.requestLocale(ctx)
+
+	if te.devMode && te.i18n != nil {
+		te.i18n.reloadIfDev()
+	}
 
 	var buf bytes.Buffer
 
-	if te.devMode {
-		t, err := te.parseView(viewName)
-		if err != nil {
-			ctx.Status(500)
-			ctx.WriteString(fmt.Sprintf("template error: %v", err))
-			return
-		}
-		if err := te.execView(t, viewName, data, isPartial, &buf); err != nil {
-			ctx.Status(500)
-			ctx.WriteString(fmt.Sprintf("render error: %v", err))
-			return
-		}
-	} else {
-		te.mu.RLock()
-		t, ok := te.templates[viewName]
-		te.mu.RUnlock()
-
-		if !ok {
-			var err error
-			t, err = te.parseView(viewName)
-			if err != nil {
-				ctx.Status(500)
-				ctx.WriteString(fmt.Sprintf("template error: %v", err))
-				return
-			}
-			te.mu.Lock()
-			te.templates[viewName] = t
-			te.mu.Unlock()
-		}
-
-		if err := te.execView(t, viewName, data, isPartial, &buf); err != nil {
-			ctx.Status(500)
-			ctx.WriteString(fmt.Sprintf("render error: %v", err))
-			return
-		}
+	t, err := te.getView(viewName, locale)
+	if err != nil {
+		ctx.Status(500)
+		ctx.WriteString(fmt.Sprintf("template error: %v", err))
+		return
+	}
+	if err := te.execView(t, viewName, locale, data, isPartial, &buf); err != nil {
+		ctx.Status(500)
+		ctx.WriteString(fmt.Sprintf("render error: %v", err))
+		return
 	}
 
 	ctx.HTML(buf.Bytes())
+}
+
+// getView returns the parsed template set for (viewName, locale), parsing
+// and caching it on first use. In devMode it re-parses every time.
+func (te *TemplateEngine) getView(viewName, locale string) (*template.Template, error) {
+	if te.devMode {
+		return te.parseView(viewName, locale)
+	}
+
+	key := localeKey(viewName, locale)
+	te.mu.RLock()
+	t, ok := te.templates[key]
+	te.mu.RUnlock()
+	if ok {
+		return t, nil
+	}
+
+	t, err := te.parseView(viewName, locale)
+	if err != nil {
+		return nil, err
+	}
+	te.mu.Lock()
+	te.templates[key] = t
+	te.mu.Unlock()
+	return t, nil
 }
 
 // execView executes the right template definition inside t.
@@ -262,6 +346,7 @@ func (te *TemplateEngine) RenderView(ctx *Context, viewName string, data any) {
 func (te *TemplateEngine) execView(
 	t *template.Template,
 	viewName string,
+	locale string,
 	data any,
 	isPartial bool,
 	buf *bytes.Buffer,
@@ -269,6 +354,7 @@ func (te *TemplateEngine) execView(
 	// Wrap data with template helpers.
 	td := &TemplateData{
 		Data:    data,
+		Locale:  locale,
 		engine:  te,
 		partial: isPartial,
 	}
@@ -283,7 +369,27 @@ func (te *TemplateEngine) execView(
 		if contentTmpl == nil {
 			contentTmpl = t
 		}
-		return contentTmpl.Execute(buf, td)
+		if err := contentTmpl.Execute(buf, td); err != nil {
+			return err
+		}
+
+		// Embed the same data/template-sources/i18n blob that a full page
+		// load would carry, *inside* the fragment itself. Partial responses
+		// are swapped into #breeze-app via innerHTML, so anything appended
+		// here becomes a child of the swapped container and the client
+		// runtime can pick it up and refresh breeze.data()/the client-side
+		// template evaluator/i18n dict for the new route. Without this,
+		// those caches only ever reflect the very first full page load and
+		// silently go stale after the first SPA navigation.
+		dataJSON, jsonErr := marshalPageData(data)
+		if jsonErr != nil {
+			dataJSON = []byte("{}")
+		}
+		tmplSources := te.collectTemplateSources(viewName)
+		buf.WriteString(breezeDataScript(dataJSON))
+		buf.WriteString(breezeTemplateScript(tmplSources))
+		buf.WriteString(te.breezeI18nScript(locale))
+		return nil
 	}
 
 	// Full page: prefer a "layout" definition, else render view directly.
@@ -311,17 +417,41 @@ func (te *TemplateEngine) execView(
 	// Embed raw template sources so the client can re-render without a server round-trip.
 	tmplSources := te.collectTemplateSources(viewName)
 
-	// Inject data tag + template sources + SPA runtime just before </body>.
+	// Inject data tag + template sources + SPA runtime right after the
+	// opening <body> tag — NOT just before </body>.
+	//
+	// The runtime defines window.breeze / window.Breeze, and the data/tmpl/
+	// i18n tags are what breeze.data() and the client-side template
+	// evaluator read from. If injected at the end of <body> (the previous
+	// behaviour), any inline <script> inside the page's own content —
+	// which the parser reaches first, since it comes earlier in the
+	// document — would execute before those globals exist. That's
+	// invisible during ordinary SPA navigation, because by then the
+	// runtime is already loaded from a prior page and simply persists
+	// (only #breeze-app's children get replaced). But it bites on the very
+	// first load of a route reached directly, and on every hard refresh:
+	// any breeze.*/Breeze.* call made at the top level of a view's own
+	// inline script throws a ReferenceError before the runtime has had a
+	// chance to define those globals, silently breaking that view — the
+	// "sometimes with refresh, things stop working" symptom. Injecting
+	// right after <body> guarantees the runtime and current route's data
+	// are always in place before any page content — and therefore any
+	// script it contains — is parsed, on both full loads and swaps alike.
 	html := buf.String()
-	injection := breezeDataScript(dataJSON) + breezeTemplateScript(tmplSources) + breezeRuntime()
-	if idx := strings.LastIndex(html, "</body>"); idx != -1 {
+	injection := breezeDataScript(dataJSON) + breezeTemplateScript(tmplSources) +
+		te.breezeI18nScript(locale) + breezeRuntime()
+	if loc := bodyOpenTag.FindStringIndex(html); loc != nil {
 		buf.Reset()
-		buf.WriteString(html[:idx])
+		buf.WriteString(html[:loc[1]])
 		buf.WriteString(injection)
-		buf.WriteString(html[idx:])
+		buf.WriteString(html[loc[1]:])
 	} else {
-		// No </body> — append at end.
+		// No <body> tag found — fall back to prepending at the very start
+		// so the runtime still loads before anything else has a chance to
+		// reference it.
+		buf.Reset()
 		buf.WriteString(injection)
+		buf.WriteString(html)
 	}
 
 	return nil
@@ -396,6 +526,25 @@ func stripDefine(src string) string {
 	return s
 }
 
+// breezeI18nScript serializes the active locale's flattened dictionary inside
+// a non-executing script tag so the client-side template evaluator can resolve
+// {{t "key"}} tags during breeze.render()/setData() re-renders. Only the
+// active locale ships to the client. Returns "" when i18n is not enabled.
+func (te *TemplateEngine) breezeI18nScript(locale string) string {
+	if te.i18n == nil || locale == "" {
+		return ""
+	}
+	dict := te.i18n.Dict(locale)
+	b, err := json.Marshal(dict)
+	if err != nil {
+		b = []byte("{}")
+	}
+	return `<script id="__breeze_i18n__" type="application/json" data-locale="` +
+		template.HTMLEscapeString(locale) + `">` +
+		string(b) +
+		`</script>` + "\n"
+}
+
 // breezeTemplateScript serializes the template-sources map as JSON inside a
 // non-executing script tag so the client can read it with breeze._tmpl(name).
 func breezeTemplateScript(sources map[string]string) string {
@@ -412,7 +561,10 @@ func breezeTemplateScript(sources map[string]string) string {
 
 // TemplateData wraps the user's data and exposes helpers inside templates.
 type TemplateData struct {
-	Data    any
+	Data any
+	// Locale is the request locale resolved by the locale middleware,
+	// e.g. for <html lang="{{.Locale}}">. Empty when i18n is not enabled.
+	Locale  string
 	engine  *TemplateEngine
 	partial bool
 }
@@ -441,10 +593,11 @@ func (te *TemplateEngine) RenderJSON(ctx *Context) {
 	}
 
 	var buf bytes.Buffer
+	locale := te.requestLocale(ctx)
 
 	if req.Component != "" {
 		// Component render — bare fragment, no layout.
-		if err := te.renderComponent(req.Component, req.Data, &buf); err != nil {
+		if err := te.renderComponent(req.Component, locale, req.Data, &buf); err != nil {
 			ctx.Status(500)
 			ctx.WriteString(fmt.Sprintf("breeze/render: component %q: %v", req.Component, err))
 			return
@@ -455,31 +608,13 @@ func (te *TemplateEngine) RenderJSON(ctx *Context) {
 
 	if req.View != "" {
 		// View render — returns only the content block (always partial).
-		t, err := func() (*template.Template, error) {
-			if te.devMode {
-				return te.parseView(req.View)
-			}
-			te.mu.RLock()
-			t, ok := te.templates[req.View]
-			te.mu.RUnlock()
-			if ok {
-				return t, nil
-			}
-			parsed, err := te.parseView(req.View)
-			if err != nil {
-				return nil, err
-			}
-			te.mu.Lock()
-			te.templates[req.View] = parsed
-			te.mu.Unlock()
-			return parsed, nil
-		}()
+		t, err := te.getView(req.View, locale)
 		if err != nil {
 			ctx.Status(500)
 			ctx.WriteString(fmt.Sprintf("breeze/render: view %q: %v", req.View, err))
 			return
 		}
-		if err := te.execView(t, req.View, req.Data, true /* always partial */, &buf); err != nil {
+		if err := te.execView(t, req.View, locale, req.Data, true /* always partial */, &buf); err != nil {
 			ctx.Status(500)
 			ctx.WriteString(fmt.Sprintf("breeze/render: view %q exec: %v", req.View, err))
 			return
@@ -536,7 +671,7 @@ func (ctx *Context) Render(engine *TemplateEngine, viewName string, data any) {
 // breeze.fetch() / breeze.poll() on the client.
 func (te *TemplateEngine) RenderComponent(ctx *Context, componentName string, data any) {
 	var buf bytes.Buffer
-	if err := te.renderComponent(componentName, data, &buf); err != nil {
+	if err := te.renderComponent(componentName, te.requestLocale(ctx), data, &buf); err != nil {
 		ctx.Status(500)
 		ctx.WriteString(fmt.Sprintf("component error: %v", err))
 		return
@@ -749,8 +884,19 @@ func breezeRuntime() string {
   }
 
   // Swap innerHTML of el, then run scripts with smart de-duplication.
+  //
+  // _refreshStateTags runs FIRST, before _runScripts, for two reasons:
+  //   1. It relocates any __breeze_data__/__breeze_tmpl__/__breeze_i18n__
+  //      tags found in the fragment out to <body>, removing them from el's
+  //      subtree. _runScripts treats any <script> without a data-spa-run
+  //      attribute as a stale inline script and deletes it — running it
+  //      first would strip these JSON tags before they could ever be read.
+  //   2. Any content script in the fragment that calls breeze.* at its own
+  //      top level (e.g. breeze.bind(...)) must see this route's data, not
+  //      whatever the previously displayed route left behind.
   function swap(el, html) {
     el.innerHTML = html;
+    _refreshStateTags(el);
     _runScripts(el);
   }
 
@@ -828,6 +974,10 @@ func breezeRuntime() string {
            document.body;
   }
 
+  // Locale this page was rendered with ('' when i18n is not enabled).
+  // _pageLocale is hoisted; the i18n tag is injected before this script.
+  var _pageLang = _pageLocale();
+
   // Persists the current scroll offset onto the *current* history entry so
   // it can be restored later if the user navigates back/forward to it.
   // Called continuously (debounced) while scrolling, and once more right
@@ -878,9 +1028,14 @@ func breezeRuntime() string {
     }
   }
 
-  // Internal invalidation helpers — not wired to any operation yet, kept
-  // available for future callers that mutate server state and need to
-  // force a fresh fetch on next visit to a route (or all routes).
+  // Invalidation helpers. Wired into breeze.setData()/the reactive store and
+  // into non-GET SPA form submissions (see below), so that any client- or
+  // server-side state mutation forces the *next* visit to a route — via
+  // link, back/forward, or history restore — to re-fetch instead of
+  // replaying a pre-mutation snapshot from _routeCache. This is the fix for
+  // "go back and the page shows stale/broken content": the cache had no
+  // eviction path tied to writes, so it kept serving fragments that no
+  // longer matched server (or client store) state.
   function _invalidateRoute(url) {
     _routeCache.delete(_normalizeUrl(url));
   }
@@ -907,6 +1062,16 @@ func breezeRuntime() string {
     var controller = new AbortController();
     _navController = controller;
 
+    // "once" inline scripts (data-spa-run="once") are scoped to a single
+    // navigation/mount, not to the whole page lifetime: every real
+    // navigation tears down and rebuilds the DOM via innerHTML, so any
+    // listeners a once-script attached directly to elements (rather than
+    // via delegation) are gone and must be reattached when the view is
+    // (re)entered — including via the back/forward button. Clearing here
+    // (and not inside breezeGet/poll/_rerender) means frequent polling or
+    // partial re-renders still only run a once-script a single time.
+    _onceScripts.clear();
+
     var seq = ++_navSeq;
     var key = _normalizeUrl(url);
     _loadingStart();
@@ -921,6 +1086,16 @@ func breezeRuntime() string {
         });
 
         if (!res.ok) { window.location.href = url; return; }
+
+        // A response in a different language than the page was rendered
+        // with means the locale changed (e.g. a ?lang= switch). Fall back
+        // to a full page load so the embedded i18n dictionary, template
+        // sources, and route cache are all rebuilt for the new locale.
+        var lang = res.headers.get('Content-Language') || '';
+        if (lang && _pageLang && lang !== _pageLang) {
+          window.location.href = url;
+          return;
+        }
 
         html = await res.text();
         _cacheRoute(key, html);
@@ -1103,6 +1278,12 @@ func breezeRuntime() string {
           return;
         }
         var target = getAppTarget();
+        // A non-GET submit is inherently a mutation — any other cached
+        // route may now be stale (e.g. a list page this POST just added
+        // a row to), so drop the whole cache rather than guess which
+        // entries are affected. The response we just got is re-cached
+        // fresh immediately after.
+        _invalidateCache();
         swap(target, html);
         _cacheRoute(_normalizeUrl(actionUrl.pathname), html);
         history.pushState({ breezeUrl: actionUrl.pathname, scrollY: 0 }, '', actionUrl.pathname);
@@ -1119,9 +1300,77 @@ func breezeRuntime() string {
   });
 
   // ── Reactive data store ────────────────────────────────────────────────
+  //
+  // breeze.data() used to be a one-shot read of the page's embedded JSON:
+  // fine for rendering the initial view, but mutating an array or object
+  // returned from it (push/splice/property assignment/delete) was
+  // invisible to the framework — nothing re-rendered and nothing
+  // invalidated the cached route, so the UI silently drifted out of sync
+  // with the data. _store is now wrapped in a Proxy so that any mutation,
+  // however it's made, is observable: it notifies breeze.watch()
+  // callbacks, re-renders any region registered with breeze.bind(), and
+  // invalidates the current route's cache entry (see _onStoreChange).
 
-  var _store    = null;
-  var _watchers = [];
+  var _store       = null;
+  var _watchers    = [];
+  var _bindings    = []; // { target, name, key } registered via breeze.bind()
+  var _renderTimer = null;
+
+  var _mutatingArrayMethods = ['push', 'pop', 'shift', 'unshift', 'splice', 'sort', 'reverse', 'copyWithin', 'fill'];
+
+  // Wraps an object/array in a Proxy that calls onChange after any
+  // mutation: direct property/index writes, deletes, or array mutator
+  // methods. Nested objects/arrays are wrapped lazily on read, so the
+  // whole tree stays reactive without an eager deep walk.
+  function _makeReactive(value, onChange) {
+    if (value === null || typeof value !== 'object' || value.__breezeReactive__) return value;
+
+    return new Proxy(value, {
+      get: function (target, prop, receiver) {
+        if (prop === '__breezeReactive__') return true;
+        var val = Reflect.get(target, prop, receiver);
+        if (Array.isArray(target) && typeof val === 'function' && _mutatingArrayMethods.indexOf(prop) !== -1) {
+          return function () {
+            var result = val.apply(target, arguments);
+            onChange();
+            return result;
+          };
+        }
+        return (val !== null && typeof val === 'object') ? _makeReactive(val, onChange) : val;
+      },
+      set: function (target, prop, val, receiver) {
+        var ok = Reflect.set(target, prop, val, receiver);
+        onChange();
+        return ok;
+      },
+      deleteProperty: function (target, prop) {
+        var ok = Reflect.deleteProperty(target, prop);
+        onChange();
+        return ok;
+      },
+    });
+  }
+
+  // Debounced (via setTimeout 0) so several synchronous mutations in the
+  // same tick — e.g. a loop of list.add() calls — collapse into a single
+  // re-render/watcher pass instead of one per mutation.
+  function _onStoreChange() {
+    if (_renderTimer) return;
+    _renderTimer = setTimeout(function () {
+      _renderTimer = null;
+      _invalidateRoute(window.location.pathname + window.location.search);
+      _notifyWatchers(_store);
+      _renderBindings();
+    }, 0);
+  }
+
+  function _renderBindings() {
+    for (var i = 0; i < _bindings.length; i++) {
+      var b = _bindings[i];
+      var data = b.key ? (_store ? _store[b.key] : undefined) : _store;
+      _rerender(b.name, data, b.target);
+    }
+  }
 
   function _readDataTag() {
     var el = document.getElementById('__breeze_data__');
@@ -1135,7 +1384,123 @@ func breezeRuntime() string {
     }
   }
 
-  // ── Client-side Go-template evaluator (unchanged) ──────────────────────
+  // Called by swap() after every fragment insert (navigation, breeze.fetch,
+  // poll, render, form submit). If the fragment carries fresh
+  // __breeze_data__ / __breeze_i18n__ / __breeze_tmpl__ tags — every view
+  // now embeds these, see execView on the server — the corresponding
+  // client-side caches are dropped and the store is rehydrated from the
+  // new tag. Previously these tags were only ever injected into full page
+  // loads and lived outside #breeze-app, so breeze.data() silently froze
+  // at whatever the very first page load contained and never reflected
+  // the route actually on screen after an SPA navigation.
+  function _refreshStateTags(el) {
+    var sawData = false;
+    ['__breeze_data__', '__breeze_i18n__', '__breeze_tmpl__'].forEach(function (id) {
+      var fresh = el.querySelector('#' + id);
+      if (!fresh) return;
+      var existing = document.getElementById(id);
+      if (existing && existing !== fresh) existing.parentNode.removeChild(existing);
+      // Relocate to <body> so exactly one canonical instance exists and it
+      // survives later swaps that don't happen to touch this tag.
+      document.body.appendChild(fresh);
+      if (id === '__breeze_data__') sawData = true;
+    });
+
+    _i18nCache = null;
+    _tmplCache = null;
+
+    if (sawData) {
+      _store = _makeReactive(_readDataTag(), _onStoreChange);
+      _notifyWatchers(_store);
+      _renderBindings();
+    }
+  }
+
+  // ── Client-side i18n ───────────────────────────────────────────────────
+  //
+  // The server injects the active locale's flattened dictionary as a
+  // non-executing JSON tag (id __breeze_i18n__, data-locale attribute) so
+  // the client-side evaluator can resolve {{t "key"}} during re-renders.
+
+  var _i18nCache = null;
+
+  function _i18nDict() {
+    if (_i18nCache) return _i18nCache;
+    var el = document.getElementById('__breeze_i18n__');
+    if (!el) { _i18nCache = {}; return _i18nCache; }
+    try { _i18nCache = JSON.parse(el.textContent); } catch(e) { _i18nCache = {}; }
+    return _i18nCache;
+  }
+
+  function _pageLocale() {
+    var el = document.getElementById('__breeze_i18n__');
+    return el ? (el.getAttribute('data-locale') || '') : '';
+  }
+
+  // Tokenize the argument list of a t tag: quoted strings become literals,
+  // everything else is an expression (number or dot-path).
+  function _tTokens(s) {
+    var tokens = [];
+    var i = 0;
+    while (i < s.length) {
+      var c = s[i];
+      if (c === ' ' || c === '\t') { i++; continue; }
+      if (c === '"' || c === "'") {
+        var end = s.indexOf(c, i + 1);
+        if (end === -1) { tokens.push({ lit: s.slice(i + 1) }); break; }
+        tokens.push({ lit: s.slice(i + 1, end) });
+        i = end + 1;
+      } else {
+        var j = i;
+        while (j < s.length && s[j] !== ' ' && s[j] !== '\t') j++;
+        tokens.push({ expr: s.slice(i, j) });
+        i = j;
+      }
+    }
+    return tokens;
+  }
+
+  // Evaluate a {{t "key" ...args}} tag against the embedded dictionary,
+  // mirroring the server-side semantics: "count" selects a zero/one/other
+  // plural form, %{name} placeholders interpolate from the args, and a
+  // missing key echoes the key itself.
+  function _evalT(rest, ctx) {
+    var tokens = _tTokens(rest);
+    if (!tokens.length || tokens[0].lit === undefined) return '';
+    var key = tokens[0].lit;
+    var dict = _i18nDict();
+
+    var args = {};
+    for (var i = 1; i + 1 < tokens.length; i += 2) {
+      var name = tokens[i].lit !== undefined ? tokens[i].lit : tokens[i].expr;
+      var vt = tokens[i + 1];
+      var argVal; // NOT named val — var hoists, and it must not shadow the lookup below
+      if (vt.lit !== undefined) {
+        argVal = vt.lit;
+      } else if (vt.expr !== '' && !isNaN(Number(vt.expr))) {
+        argVal = Number(vt.expr);
+      } else {
+        argVal = _resolvePath(vt.expr, ctx);
+      }
+      args[name] = argVal;
+    }
+
+    var val;
+    if (Object.prototype.hasOwnProperty.call(args, 'count')) {
+      var n = Number(args['count']);
+      if (n === 0 && dict[key + '.zero'] !== undefined) val = dict[key + '.zero'];
+      else if (n === 1 && dict[key + '.one'] !== undefined) val = dict[key + '.one'];
+      else if (dict[key + '.other'] !== undefined) val = dict[key + '.other'];
+    }
+    if (val === undefined) val = dict[key];
+    if (val === undefined) return key;
+
+    return val.replace(/%\{([^}]+)\}/g, function (m, name) {
+      return Object.prototype.hasOwnProperty.call(args, name) ? String(args[name]) : m;
+    });
+  }
+
+  // ── Client-side Go-template evaluator ──────────────────────────────────
 
   var _tmplCache = null;
 
@@ -1212,6 +1577,11 @@ func breezeRuntime() string {
       }
 
       if (tag === 'end') continue;
+
+      if (tag.slice(0, 2) === 't ') {
+        out += _evalT(tag.slice(2), ctx);
+        continue;
+      }
 
       if (tag.slice(0, 9) === 'component' || tag.slice(0, 7) === 'partial') {
         var rest = tag.slice(tag[0] === 'c' ? 9 : 7).trim();
@@ -1337,16 +1707,17 @@ func breezeRuntime() string {
     navigate: function(url) { navigate(url, true); },
 
     data: function(key) {
-      var d = _store !== null ? _store : _readDataTag();
-      if (_store === null) _store = d;
-      return key ? (d && typeof d === 'object' ? d[key] : undefined) : d;
+      if (_store === null) _store = _makeReactive(_readDataTag(), _onStoreChange);
+      return key ? (_store && typeof _store === 'object' ? _store[key] : undefined) : _store;
     },
 
     setData: function(newData, target, name) {
-      _store = newData;
-      _notifyWatchers(newData);
-      if (name) { return _rerender(name, newData, target); }
-      return Promise.resolve(newData);
+      _store = _makeReactive(newData, _onStoreChange);
+      _invalidateRoute(window.location.pathname + window.location.search);
+      _notifyWatchers(_store);
+      _renderBindings();
+      if (name) { return _rerender(name, _store, target); }
+      return Promise.resolve(_store);
     },
 
     render: function(name, data, target) {
@@ -1356,6 +1727,74 @@ func breezeRuntime() string {
     watch: function(fn) {
       _watchers.push(fn);
       return function() { _watchers = _watchers.filter(function(w) { return w !== fn; }); };
+    },
+
+    // ── Reactive collections ──────────────────────────────────────────────
+    //
+    // breeze.list('items') returns helpers over breeze.data().items that
+    // mutate the array in place (push/splice/index assignment). Because the
+    // store is Proxy-backed, every one of these calls automatically:
+    //   - notifies breeze.watch() callbacks
+    //   - re-renders any region registered with breeze.bind()
+    //   - invalidates the current route's cache entry
+    // — no manual breeze.render()/breeze.setData() call needed afterwards.
+    list: function(key) {
+      var d = window.breeze.data();
+      if (!Array.isArray(d[key])) d[key] = [];
+      return {
+        all:    function()      { return d[key]; },
+        add:    function(item)  { d[key].push(item); return d[key]; },
+        update: function(index, patch) {
+          var i = (typeof index === 'function') ? d[key].findIndex(index) : index;
+          if (i !== -1 && d[key][i] !== undefined) {
+            d[key][i] = Object.assign({}, d[key][i], patch);
+          }
+          return d[key];
+        },
+        remove: function(index) {
+          var i = (typeof index === 'function') ? d[key].findIndex(index) : index;
+          if (i !== -1) d[key].splice(i, 1);
+          return d[key];
+        },
+        set: function(arr) { d[key] = arr; return d[key]; },
+      };
+    },
+
+    // Registers a persistent binding: whenever the store (or store[key], if
+    // given) changes — via setData, breeze.list(), or direct mutation of
+    // breeze.data() — target is automatically re-rendered with the
+    // client-side template 'name'. Renders once immediately with current
+    // data. Returns an unbind function.
+    bind: function(target, name, key) {
+      var b = { target: target, name: name, key: key };
+      _bindings.push(b);
+      var data = key ? window.breeze.data(key) : window.breeze.data();
+      _rerender(name, data, target);
+      return function unbind() { _bindings = _bindings.filter(function(x) { return x !== b; }); };
+    },
+
+    // Force the next visit to 'url' (default: the current route) to
+    // re-fetch instead of reusing a cached fragment. invalidateAll() clears
+    // every cached route. Called automatically on any store mutation and
+    // on non-GET SPA form submissions; exposed here for manual use when a
+    // mutation happens through some path the framework can't see (e.g. a
+    // fetch() call you make yourself).
+    invalidate:    function(url) { _invalidateRoute(url || (window.location.pathname + window.location.search)); },
+    invalidateAll: function()    { _invalidateCache(); },
+
+    // Delegated event binding: attaches once to document and matches
+    // selector via closest() on every event, so handlers keep working
+    // for elements that get replaced by a later swap — unlike
+    // el.addEventListener() calls made inside a view's own inline script,
+    // which lose their target the moment that view's content is swapped
+    // out and back in. Returns a function that removes the listener.
+    on: function(selector, event, handler) {
+      var listener = function(e) {
+        var el = e.target.closest(selector);
+        if (el) handler.call(el, e, el);
+      };
+      document.addEventListener(event, listener);
+      return function off() { document.removeEventListener(event, listener); };
     },
 
     ws: function(path, handlers) {
@@ -1413,7 +1852,6 @@ func breezeRuntime() string {
 `
 }
 
-
 // breezeDataScript wraps the page JSON in a non-executing script tag so the
 // client can read it with breeze.data() without it polluting the global scope.
 func breezeDataScript(dataJSON []byte) string {
@@ -1427,17 +1865,26 @@ func breezeDataScript(dataJSON []byte) string {
 // Preload parses all view and component templates eagerly.
 // Call this at startup (after all routes are registered) to surface template
 // errors early and warm the cache before the first request.
+//
+// With i18n enabled, templates are parsed for the default locale; other
+// locales parse lazily on their first request (parse errors are locale-
+// independent, so Preload still surfaces every template error).
 func (te *TemplateEngine) Preload() error {
+	locale := ""
+	if te.i18n != nil {
+		locale = te.i18n.DefaultLocale()
+	}
+
 	// Load components.
 	compFiles, _ := filepath.Glob(filepath.Join(te.compDir, "*.html"))
 	for _, cf := range compFiles {
 		name := strings.TrimSuffix(filepath.Base(cf), ".html")
-		t, err := te.parseComponent(name)
+		t, err := te.parseComponent(name, locale)
 		if err != nil {
 			return fmt.Errorf("breeze/template: preload component %q: %w", name, err)
 		}
 		te.mu.Lock()
-		te.components[name] = t
+		te.components[localeKey(name, locale)] = t
 		te.mu.Unlock()
 	}
 
@@ -1452,12 +1899,12 @@ func (te *TemplateEngine) Preload() error {
 			}
 		}
 		name := strings.TrimSuffix(base, ".html")
-		t, err := te.parseView(name)
+		t, err := te.parseView(name, locale)
 		if err != nil {
 			return fmt.Errorf("breeze/template: preload view %q: %w", name, err)
 		}
 		te.mu.Lock()
-		te.templates[name] = t
+		te.templates[localeKey(name, locale)] = t
 		te.mu.Unlock()
 	}
 

@@ -3,13 +3,13 @@
   <h1>Users</h1>
 
   <div id="users-table">
-    {{component "users-table" .Data}}
+    {{component "users-table" .Data.users}}
   </div>
 
   <div class="add-form">
     <input id="new-name"  type="text" placeholder="Name" />
     <input id="new-email" type="text" placeholder="Email" />
-    <button onclick="addUser()">+ Add user</button>
+    <button id="add-user-btn">+ Add user</button>
   </div>
 
   <div id="ws-log-box">
@@ -17,75 +17,102 @@
   </div>
 </div>
 
-<script>
-  // ── Two independent reactive stores ───────────────────────────────────
+<script data-spa-run="once">
+  // ── Reactive state, the enterprise-friendly way ─────────────────────────
   //
-  // _users  — the user list, seeded from server JSON, drives #users-table
-  // _logs   — WS event log entries, starts empty, drives #ws-log-box
+  // breeze.bind() ties #users-table to breeze.data().users: any mutation of
+  // that array — from breeze.list() below, another tab via WS, or a plain
+  // .push()/.splice() on breeze.data().users directly — automatically
+  // re-renders the table. No manual breeze.render() call after every edit,
+  // and no local shadow copy of the array to keep in sync by hand.
   //
-  // Both are updated exclusively through breeze.render(), which evaluates
-  // the component template client-side (from __breeze_tmpl__) and swaps
-  // the DOM. No manual DOM writes anywhere.
-
-  var _users = breeze.data();   // []User seeded from __breeze_data__
-  var _logs  = [];              // []string, purely client-side
+  // data-spa-run="once" re-runs this script once each time you navigate to
+  // /users — including via the back/forward button — which is what makes
+  // usersList below always operate on the currently displayed route's
+  // data. But breeze.bind(), breeze.on(), and breeze.ws() each register
+  // something persistent (a binding entry, a document-level listener, a
+  // socket) that must only ever be registered once per page lifetime —
+  // _rerender()/delegated listeners re-resolve their DOM targets by
+  // selector at call time, so one registration keeps working across any
+  // number of future visits; registering again on every visit would just
+  // accumulate duplicates (multiple fires per click, extra sockets).
+  var usersList = breeze.list('users');
 
   function pushLog(msg) {
-    _logs.unshift('[' + new Date().toLocaleTimeString() + '] ' + msg);
-    breeze.render('ws-log', _logs, '#ws-log-box');
+    var logs = breeze.data('logs') || [];
+    logs = [ '[' + new Date().toLocaleTimeString() + '] ' + msg ].concat(logs);
+    breeze.data().logs = logs; // reactive set — keeps breeze.data() in sync too
+    breeze.render('ws-log', logs, '#ws-log-box');
   }
 
-  function addUser() {
-    var name  = document.getElementById('new-name').value.trim();
-    var email = document.getElementById('new-email').value.trim();
-    if (!name || !email) return;
+  if (!window._usersInitialized) {
+    window._usersInitialized = true;
 
-    var newUser = { ID: String(_users.length + 1), Name: name, Email: email };
-    _users.push(newUser);
+    breeze.bind('#users-table', 'users-table', 'users');
 
-    // Re-render the table locally — no server round-trip.
-    breeze.render('users-table', _users, '#users-table');
+    breeze.on('#add-user-btn', 'click', function() {
+      var nameEl  = document.getElementById('new-name');
+      var emailEl = document.getElementById('new-email');
+      var name  = nameEl.value.trim();
+      var email = emailEl.value.trim();
+      if (!name || !email) return;
 
-    // Persist to the server so the change survives a refresh.
-    fetch('/api/users', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newUser),
-      credentials: 'same-origin',
+      var newUser = { ID: String(usersList.all().length + 1), Name: name, Email: email };
+
+      // Mutating .add() alone already updates #users-table via the
+      // breeze.bind() above — the calls below persist to the server and
+      // broadcast to other clients, they don't drive this page's UI.
+      usersList.add(newUser);
+
+      fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newUser),
+        credentials: 'same-origin',
+      }).then(function() {
+        // A row was added server-side too: any other cached route that
+        // lists users (there's only this one today, but this generalises)
+        // must not replay a pre-add snapshot on a future visit.
+        breeze.invalidateAll();
+      });
+
+      if (window._chatSocket) window._chatSocket.send(JSON.stringify({ event: 'user:added', user: newUser }));
+
+      nameEl.value  = '';
+      emailEl.value = '';
     });
 
-    // Broadcast to other clients via WS.
-    chat.send(JSON.stringify({ event: 'user:added', user: newUser }));
+    breeze.on('.remove-user', 'click', function(e, el) {
+      var id = el.getAttribute('data-id');
+      usersList.remove(function(u) { return u.ID === id; });
 
-    document.getElementById('new-name').value  = '';
-    document.getElementById('new-email').value = '';
-  }
+      fetch('/api/users/' + id, { method: 'DELETE', credentials: 'same-origin' })
+        .then(function() { breeze.invalidateAll(); });
 
-  // ── WebSocket ─────────────────────────────────────────────────────────
-  //
-  // When another client adds a user, onMessage updates _users and re-renders
-  // the table — exactly the same path as addUser(), just triggered remotely.
+      if (window._chatSocket) window._chatSocket.send(JSON.stringify({ event: 'user:removed', id: id }));
+    });
 
-  var chat = breeze.ws('/ws', {
-    onOpen: function() {
-      pushLog('Connected to /ws');
-    },
-    onMessage: function(e) {
-      try {
-        var msg = JSON.parse(e.data);
-        if (msg.event === 'user:added') {
-          _users.push(msg.user);
-          breeze.render('users-table', _users, '#users-table');
-          pushLog('New user from another client: ' + msg.user.Name);
-        } else {
+    window._chatSocket = breeze.ws('/ws', {
+      onOpen:  function() { pushLog('Connected to /ws'); },
+      onClose: function() { pushLog('Disconnected — reconnecting...'); },
+      onMessage: function(e) {
+        try {
+          var msg = JSON.parse(e.data);
+          if (msg.event === 'user:added') {
+            usersList.add(msg.user);
+            pushLog('New user from another client: ' + msg.user.Name);
+          } else if (msg.event === 'user:removed') {
+            usersList.remove(function(u) { return u.ID === msg.id; });
+            pushLog('User removed by another client: ' + msg.id);
+          } else {
+            pushLog(e.data);
+          }
+        } catch (_) {
           pushLog(e.data);
         }
-      } catch(_) {
-        pushLog(e.data);
-      }
-    },
-    onClose: function() { pushLog('Disconnected — reconnecting...'); },
-  });
+      },
+    });
+  }
 </script>
 
 <style>

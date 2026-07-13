@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nelthaarion/breeze"
+	middleware "github.com/nelthaarion/breeze/middlewares"
 )
 
 type User struct {
@@ -46,16 +47,44 @@ func addUser(u User) {
 	users = append(users, u)
 }
 
+func removeUser(id string) {
+	usersMu.Lock()
+	defer usersMu.Unlock()
+	for i, u := range users {
+		if u.ID == id {
+			users = append(users[:i], users[i+1:]...)
+			return
+		}
+	}
+}
+
 func main() {
 	router := breeze.NewRouter()
 	pool := breeze.NewWorkerPool(runtime.NumCPU())
 	app := breeze.New(router, pool)
+
+	// ── i18n ──────────────────────────────────────────────────────────────
+	//
+	// Translations: locales/<lang>.json + {{t "some.key"}} in templates.
+	// The middleware resolves the request locale from ?lang=, the
+	// breeze_locale cookie, or Accept-Language.
+	i18n, err := breeze.NewI18n(breeze.I18nConfig{
+		Dir:           "./locales",
+		DefaultLocale: "en",
+		Fallback:      true,
+		DevMode:       true,
+	})
+	if err != nil {
+		panic(err)
+	}
+	router.Use(middleware.LocaleMiddleware(i18n))
 
 	engine := breeze.NewTemplateEngine(breeze.TemplateConfig{
 		ViewsDir:      "./views",
 		ComponentsDir: "./components",
 		LayoutFile:    "./views/layout.html",
 		DevMode:       true,
+		I18n:          i18n,
 	})
 
 	if err := engine.Preload(); err != nil {
@@ -69,7 +98,10 @@ func main() {
 	router.View("/", engine, "home", nil)
 	router.View("/about", engine, "about", nil)
 	router.View("/users", engine, "users", func(ctx *breeze.Context) any {
-		return getUsers()
+		return map[string]any{
+			"users": getUsers(),
+			"logs":  []string{},
+		}
 	})
 
 	// ── SPA form demo routes ──────────────────────────────────────────────
@@ -114,6 +146,11 @@ func main() {
 
 	router.Handle(breeze.GET, "/api/users", func(ctx *breeze.Context) {
 		ctx.JSON(getUsers())
+	})
+
+	router.Handle(breeze.DELETE, "/api/users/:id", func(ctx *breeze.Context) {
+		removeUser(ctx.Param("id"))
+		ctx.Status(204)
 	})
 
 	// ── Fragment routes ───────────────────────────────────────────────────

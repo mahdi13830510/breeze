@@ -1,12 +1,13 @@
 {{define "users-table"}}
 <table>
-  <thead><tr><th>ID</th><th>Name</th><th>Email</th></tr></thead>
+  <thead><tr><th>ID</th><th>Name</th><th>Email</th><th></th></tr></thead>
   <tbody>
     {{range .}}
     <tr>
       <td>{{.ID}}</td>
       <td>{{.Name}}</td>
       <td>{{.Email}}</td>
+      <td><button class="remove-user" data-id="{{.ID}}">Remove</button></td>
     </tr>
     {{end}}
   </tbody>
