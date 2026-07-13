@@ -28,6 +28,8 @@ efficiently while keeping your code clean and maintainable.
 
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Docker](#docker)
+- [CLI — Scaffolding & Code Generation](#-cli--scaffolding--code-generation)
 - [Features](#features)
   - [Built for Extreme Performance](#-built-for-extreme-performance)
   - [High-Performance Routing](#-high-performance-routing)
@@ -39,11 +41,12 @@ efficiently while keeping your code clean and maintainable.
   - [Performance Optimizations](#-performance-optimizations)
 - [Support the Project](#-support-the-project)
 - [Contributing](#-contributing)
+- [Security Scanning](#-security-scanning)
 - [License](#license)
 
 ## Installation
 
-Requires **Go 1.24.3** or later.
+Requires **Go 1.25.12** or later.
 
 ```bash
 go get github.com/nelthaarion/breeze
@@ -96,6 +99,65 @@ go run main.go
 # → curl http://localhost:3000/        → {"status":"ok"}
 # → curl http://localhost:3000/users/42 → {"id":"42"}
 ```
+
+## Docker
+
+The repository ships a multi-stage `Dockerfile` and `docker-compose.yml`
+that containerize the example server in `./cmd` (~25 MB image, static
+binary, non-root user, built-in healthcheck):
+
+```bash
+# Plain Docker
+docker build -t breeze-example .
+docker run --rm -p 3000:3000 breeze-example
+
+# Or with Compose
+docker compose up --build
+```
+
+Breeze itself is a library — to containerize your own application, point
+the `BREEZE_TARGET` build argument at any main package in the module:
+
+```bash
+docker build --build-arg BREEZE_TARGET=./cmd/dashboard-example -t my-app .
+```
+
+## 🧰 CLI — Scaffolding & Code Generation
+
+Breeze ships a `rails`-style CLI for scaffolding projects and generating
+CRUD boilerplate.
+
+```bash
+go install github.com/nelthaarion/breeze/cmd/breeze@latest
+```
+
+**Start a new project:**
+
+```bash
+breeze new myapp                    # minimal REST API layout (default)
+breeze new myapp --template=views   # + views/components/template engine
+```
+
+**Generate a full CRUD resource** — structs, handlers, an in-memory store,
+and OpenAPI docs, wired into the router automatically:
+
+```bash
+breeze generate resource User name:string email:string age:int
+```
+
+**Generate a bare handler stub** (no structs, no docs):
+
+```bash
+breeze generate handler Session --methods=get,create
+```
+
+Both generators write to `handlers/<name>.go` and register routes in a
+single `routes_generated.go` file — your hand-written `main.go` is never
+touched. Re-running `generate` for the same resource replaces its block,
+so it's safe to regenerate after adding fields (pass `--force` to overwrite
+the handler file too).
+
+Supported field types: `string`, `int`, `int64`, `float64`, `bool`, `time.Time`.
 
 ## Features
 
@@ -221,6 +283,21 @@ Breeze better.
 
 Please open an issue first for non-trivial changes so we can align on
 the approach before you spend time on code.
+
+## 🔐 Security Scanning
+
+Breeze now includes automated security checks in GitHub Actions:
+
+- **CodeQL** static analysis (`.github/workflows/codeql.yml`)
+- **govulncheck** vulnerability scanning for Go packages and reachable code (`.github/workflows/govulncheck.yml`)
+- **Gitleaks** secret scanning (`.github/workflows/secret-scan.yml`)
+- **Dependabot** weekly updates for Go modules and GitHub Actions (`.github/dependabot.yml`)
+
+For repository admins:
+
+- Enable GitHub Advanced Security **secret scanning** and **push protection** in repository settings when available.
+- Configure branch protection to require the three security workflow checks before merge.
+- Use the triage process in `.github/SECURITY_TRIAGE.md` to classify and resolve alerts.
 
 ## License
 

@@ -1,4 +1,8 @@
 /*.zip
 /files/
-*.diff
-*.txt
+/breeze
+/.idea/breeze.iml
+/.idea/encodings.xml
+/.idea/modules.xml
+/.idea/vcs.xml
+/.idea/.gitignore
