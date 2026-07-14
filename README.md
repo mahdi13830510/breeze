@@ -251,22 +251,6 @@ See [`dashboard/README.md`](./dashboard/README.md) for full documentation.
 
 ---
 
-## ❤️ Support the Project
-
-If Breeze saves you time, consider buying me a coffee. Every contribution
-keeps the framework maintained and the benchmarks honest.
-
-<div align="center">
-
-<img width="185" height="215" alt="Support Breeze" src="https://github.com/user-attachments/assets/def5c7fc-4c6e-480b-91a4-2a574f23a533" />
-
-**USDT (BEP20)**
-
-`0x2EF70423BC989C5203c9031811179DD6EDe32793`
-
-</div>
-
----
 
 ## 🤝 Contributing
 
