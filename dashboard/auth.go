@@ -2,7 +2,6 @@ package dashboard
 
 import (
 	"crypto/pbkdf2"
-	"crypto/rand"
 	"crypto/sha512"
 	"crypto/subtle"
 	"strings"
@@ -124,13 +123,16 @@ func extractCookieValue(cookieHeader, name string) string {
 	return ""
 }
 
-// hashPass returns a hex SHA-256 of the password. We compare hashes rather
-// than plaintext so the constant-time comparison always runs on a fixed-size
-// buffer.
+// dashboardAuthSalt is a fixed salt for hashPass. It only needs to prevent
+// rainbow-table lookups for the single dashboard credential; it must stay
+// constant across calls so hashes of the same password always match.
+var dashboardAuthSalt = []byte("breeze-dashboard-auth-salt-v1")
+
+// hashPass returns a PBKDF2 derivation of the password. We compare hashes
+// rather than plaintext so the constant-time comparison always runs on a
+// fixed-size buffer.
 func hashPass(p string) []byte {
-	salt := make([]byte, 16)
-	rand.Read(salt)
-	key, _ := pbkdf2.Key(sha512.New, p, salt, 4096, 32)
+	key, _ := pbkdf2.Key(sha512.New, p, dashboardAuthSalt, 4096, 32)
 	return key
 }
 
